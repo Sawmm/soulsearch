@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Project Specific
+.gemini/
+agent.md
+
+# Configuration
+# Users should create this manually or from a template
+# We ignore the actual config to protect credentials
+config.json
