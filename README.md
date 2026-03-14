@@ -48,7 +48,7 @@ Designed for crate diggers and DJs who want a fast, focused, and visually pleasi
 
 1. **Clone the repo:**
    ```bash
-   git clone https://github.com/yourusername/soulseek-browser-tui.git
+   git clone https://github.com/Sawmm/soulseek-browser-tui.git
    cd soulseek-browser-tui
    ```
 
