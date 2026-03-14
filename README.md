@@ -2,7 +2,6 @@
 
 A high-performance, standalone Terminal User Interface (TUI) for the Soulseek network. Built with Node.js, React (Ink), and `slsk-client`.
 
-Designed for crate diggers and DJs who want a fast, focused, and visually pleasing way to discover music without leaving the terminal. Optimised for **Ghostty** and high-contrast terminal environments.
 
 ```text
  ♫ SOULSEEK BROWSER
