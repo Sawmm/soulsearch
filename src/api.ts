@@ -1,4 +1,3 @@
-import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -8,6 +7,8 @@ import { SearchResult, SearchResultFile, AppConfig, DiscogsResult } from './type
 
 let client: any = null;
 let connectionPromise: Promise<void> | null = null;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 10;
 const activeDownloads = new Map<string, { stream?: any, writeStream?: fs.WriteStream, rejectPromise?: (err: Error) => void }>();
 
 const CONFIG_PATH = path.join(os.homedir(), '.config', 'soulseekbrowser', 'config.json');
@@ -74,7 +75,11 @@ function loadConfig(): AppConfig {
                 );
             }
         }
-    } catch (e) {}
+    } catch (e) {
+        if (e instanceof SyntaxError) {
+            console.error(`Warning: Failed to parse config file at ${CONFIG_PATH}: ${e.message}`);
+        }
+    }
     return config;
 }
 
@@ -100,6 +105,7 @@ export async function ensureConnected(): Promise<void> {
                 return reject(err);
             }
             client = res;
+            reconnectAttempts = 0;
             
             // Connection Heartbeat / Reconnection Logic
             const handleDisconnect = () => {
@@ -107,10 +113,12 @@ export async function ensureConnected(): Promise<void> {
                     try { client.destroy(); } catch (e) {}
                     client = null;
                 }
-                // Silently attempt to reconnect in the background after 5s
+                if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) return;
+                reconnectAttempts++;
+                const delay = Math.min(5000 * Math.pow(2, reconnectAttempts - 1), 300000);
                 setTimeout(() => {
                     ensureConnected().catch(() => {});
-                }, 5000);
+                }, delay);
             };
 
             client.on('error', handleDisconnect);
@@ -242,7 +250,7 @@ function cleanupDownload(id: string, localPath?: string) {
     const active = activeDownloads.get(id);
     if (active) {
         if (active.stream) active.stream.destroy();
-        if (active.writeStream) active.writeStream.close();
+        if (active.writeStream) active.writeStream.destroy();
         activeDownloads.delete(id);
     }
     if (localPath && fs.existsSync(localPath)) {

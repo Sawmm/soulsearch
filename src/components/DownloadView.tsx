@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { THEME } from '../theme.js';
 import type { DownloadTask } from '../types.js';
+import { formatSize } from '../utils.js';
 
 interface DownloadViewProps {
     downloads: DownloadTask[];
@@ -11,18 +12,21 @@ interface DownloadViewProps {
     onPlay: (localPath: string, filename: string) => void;
 }
 
-const formatSize = (bytes: number): string => {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-};
-
 export const DownloadView: React.FC<DownloadViewProps> = ({ downloads, isFocused = false, onCancel, onClear, onPlay }) => {
     const [selectedIndex, setSelectedIndex] = useState(0);
     const [scrollOffset, setScrollOffset] = useState(0);
     const VIEWPORT_SIZE = 15;
+
+    useEffect(() => {
+        if (downloads.length === 0) {
+            setSelectedIndex(0);
+            setScrollOffset(0);
+        } else if (selectedIndex >= downloads.length) {
+            const clamped = downloads.length - 1;
+            setSelectedIndex(clamped);
+            if (clamped < scrollOffset) setScrollOffset(clamped);
+        }
+    }, [downloads.length, selectedIndex, scrollOffset]);
 
     useInput((input, key) => {
         if (!isFocused || downloads.length === 0) {

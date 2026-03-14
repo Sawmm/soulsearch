@@ -69,112 +69,104 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
      * If throughMp3 is true, first re-encodes to 320k MP3 via a temp file.
      * This chunked streaming prevents Out Of Memory (OOM) errors on large 24-bit FLACs.
      */
-    function processSpectralStream(inputPath: string, throughMp3: boolean): Promise<number> {
-        return new Promise(async (resolve, reject) => {
-            const runFFTStream = (srcPath: string) => {
-                return new Promise<number>((res, rej) => {
-                    const fft = new FFT(fftSize);
-                    const powerSpectrum = new Float32Array(fftSize / 2).fill(0);
-                    let numBlocks = 0;
-                    
-                    let leftoverBuffer = Buffer.alloc(0);
-                    const blockSizeBytes = fftSize * 2; // 16-bit PCM = 2 bytes per sample
+    async function processSpectralStream(inputPath: string, throughMp3: boolean): Promise<number> {
+        const runFFTStream = (srcPath: string) => {
+            return new Promise<number>((res, rej) => {
+                const fft = new FFT(fftSize);
+                const powerSpectrum = new Float32Array(fftSize / 2).fill(0);
+                let numBlocks = 0;
+                
+                let leftoverBuffer = Buffer.alloc(0);
+                const blockSizeBytes = fftSize * 2; // 16-bit PCM = 2 bytes per sample
 
-                    const cmd = ffmpeg(srcPath)
-                        .noVideo()
-                        .audioChannels(1)
-                        .audioFrequency(sampleRate)
-                        .toFormat('s16le')
-                        .on('error', rej);
+                const cmd = ffmpeg(srcPath)
+                    .noVideo()
+                    .audioChannels(1)
+                    .audioFrequency(sampleRate)
+                    .toFormat('s16le')
+                    .on('error', rej);
 
-                    const stream = cmd.pipe();
+                const stream = cmd.pipe();
+                
+                stream.on('data', (chunk: Buffer) => {
+                    let currentBuffer = Buffer.concat([leftoverBuffer, chunk]);
                     
-                    stream.on('data', (chunk: Buffer) => {
-                        let currentBuffer = Buffer.concat([leftoverBuffer, chunk]);
+                    while (currentBuffer.length >= blockSizeBytes) {
+                        const blockRaw = currentBuffer.subarray(0, blockSizeBytes);
+                        currentBuffer = currentBuffer.subarray(blockSizeBytes);
                         
-                        while (currentBuffer.length >= blockSizeBytes) {
-                            const blockRaw = currentBuffer.subarray(0, blockSizeBytes);
-                            currentBuffer = currentBuffer.subarray(blockSizeBytes);
-                            
-                            const samples = new Float32Array(fftSize);
-                            for (let i = 0; i < fftSize; i++) {
-                                samples[i] = blockRaw.readInt16LE(i * 2) / 32768;
-                            }
-                            
-                            const out = fft.createComplexArray();
-                            fft.realTransform(out, samples);
-
-                            for (let j = 0; j < fftSize / 2; j++) {
-                                const real = out[j * 2];
-                                const imag = out[j * 2 + 1];
-                                powerSpectrum[j] += real * real + imag * imag;
-                            }
-                            numBlocks++;
+                        const samples = new Float32Array(fftSize);
+                        for (let i = 0; i < fftSize; i++) {
+                            samples[i] = blockRaw.readInt16LE(i * 2) / 32768;
                         }
-                        leftoverBuffer = currentBuffer;
-                    });
-                    
-                    stream.on('end', () => {
-                        if (numBlocks === 0) return res(0);
+                        
+                        const out = fft.createComplexArray();
+                        fft.realTransform(out, samples);
 
-                        // Average over blocks, convert to dB
-                        const dbSpectrum = new Float32Array(fftSize / 2);
                         for (let j = 0; j < fftSize / 2; j++) {
-                            dbSpectrum[j] = 10 * Math.log10(powerSpectrum[j] / numBlocks + 1e-10);
+                            const real = out[j * 2];
+                            const imag = out[j * 2 + 1];
+                            powerSpectrum[j] += real * real + imag * imag;
                         }
+                        numBlocks++;
+                    }
+                    leftoverBuffer = currentBuffer;
+                });
+                
+                stream.on('end', () => {
+                    if (numBlocks === 0) return res(0);
 
-                        // Find threshold: mean power of all bins above 14kHz
-                        const minBin = Math.floor(MIN_ANALYSIS_FREQ * fftSize / sampleRate);
-                        let sum = 0;
-                        for (let j = minBin; j < fftSize / 2; j++) sum += dbSpectrum[j];
-                        const meanDb = sum / (fftSize / 2 - minBin);
+                    // Average over blocks, convert to dB
+                    const dbSpectrum = new Float32Array(fftSize / 2);
+                    for (let j = 0; j < fftSize / 2; j++) {
+                        dbSpectrum[j] = 10 * Math.log10(powerSpectrum[j] / numBlocks + 1e-10);
+                    }
 
-                        // Max useful frequency: highest bin above 14kHz that is significantly
-                        // above the mean (has actual signal)
-                        const SIGNAL_THRESHOLD = meanDb + 10; // 10dB above noise
-                        let maxBin = minBin;
-                        for (let j = fftSize / 2 - 1; j >= minBin; j--) {
-                            if (dbSpectrum[j] > SIGNAL_THRESHOLD) {
-                                maxBin = j;
-                                break;
-                            }
+                    // Find threshold: mean power of all bins above 14kHz
+                    const minBin = Math.floor(MIN_ANALYSIS_FREQ * fftSize / sampleRate);
+                    let sum = 0;
+                    for (let j = minBin; j < fftSize / 2; j++) sum += dbSpectrum[j];
+                    const meanDb = sum / (fftSize / 2 - minBin);
+
+                    // Max useful frequency: highest bin above 14kHz that is significantly
+                    // above the mean (has actual signal)
+                    const SIGNAL_THRESHOLD = meanDb + 10; // 10dB above noise
+                    let maxBin = minBin;
+                    for (let j = fftSize / 2 - 1; j >= minBin; j--) {
+                        if (dbSpectrum[j] > SIGNAL_THRESHOLD) {
+                            maxBin = j;
+                            break;
                         }
+                    }
 
-                        res((maxBin * sampleRate) / fftSize);
-                    });
+                    res((maxBin * sampleRate) / fftSize);
                 });
-            };
+            });
+        };
 
-            if (!throughMp3) {
-                try {
-                    resolve(await runFFTStream(inputPath));
-                } catch (e) { reject(e); }
-                return;
-            }
+        if (!throughMp3) {
+            return runFFTStream(inputPath);
+        }
 
-            // Two-stage: encode to a temp MP3 on disk, then decode and stream to FFT.
-            const tmpMp3 = path.join(os.tmpdir(), `slsk_fakecheck_${Date.now()}.mp3`);
-            try {
-                await new Promise<void>((res, rej) => {
-                    ffmpeg(inputPath)
-                        .noVideo()
-                        .audioChannels(1)
-                        .audioFrequency(sampleRate)
-                        .toFormat('mp3')
-                        .audioBitrate('320k')
-                        .on('error', rej)
-                        .on('end', () => res())
-                        .save(tmpMp3);
-                });
+        // Two-stage: encode to a temp MP3 on disk, then decode and stream to FFT.
+        const tmpMp3 = path.join(os.tmpdir(), `slsk_fakecheck_${Date.now()}.mp3`);
+        try {
+            await new Promise<void>((res, rej) => {
+                ffmpeg(inputPath)
+                    .noVideo()
+                    .audioChannels(1)
+                    .audioFrequency(sampleRate)
+                    .toFormat('mp3')
+                    .audioBitrate('320k')
+                    .on('error', rej)
+                    .on('end', () => res())
+                    .save(tmpMp3);
+            });
 
-                const maxFreq = await runFFTStream(tmpMp3);
-                resolve(maxFreq);
-            } catch (e) {
-                reject(e);
-            } finally {
-                try { fs.unlinkSync(tmpMp3); } catch (_) {}
-            }
-        });
+            return await runFFTStream(tmpMp3);
+        } finally {
+            try { fs.unlinkSync(tmpMp3); } catch (_) {}
+        }
     }
 
     try {
