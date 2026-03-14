@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
+import TextInput from 'ink-text-input';
 import { THEME } from '../theme.js';
 import { AppConfig, SearchResult, SearchResultFile } from '../types.js';
 
@@ -32,9 +33,12 @@ export const ResultTable: React.FC<ResultTableProps> = ({
 }) => {
     const [selectedIndex, setSelectedIndex] = useState(0);
     const [scrollOffset, setScrollOffset] = useState(0);
+    const [isFiltering, setIsFiltering] = useState(false);
+    const [filterText, setFilterText] = useState('');
+
     const VIEWPORT_SIZE = config.ui.viewportSize;
 
-    const flattenedResults: { user: string; file: SearchResultFile; hasFreeUploadSlot: boolean }[] = [];
+    let flattenedResults: { user: string; file: SearchResultFile; hasFreeUploadSlot: boolean }[] = [];
     results.forEach(result => {
         result.files.forEach(file => {
             flattenedResults.push({ 
@@ -44,6 +48,15 @@ export const ResultTable: React.FC<ResultTableProps> = ({
             });
         });
     });
+
+    // Apply inline filter
+    if (filterText) {
+        const lowerFilter = filterText.toLowerCase();
+        flattenedResults = flattenedResults.filter(r => 
+            r.user.toLowerCase().includes(lowerFilter) || 
+            r.file.filename.toLowerCase().includes(lowerFilter)
+        );
+    }
 
     // Dynamic Sorting based on config
     flattenedResults.sort((a, b) => {
@@ -65,6 +78,7 @@ export const ResultTable: React.FC<ResultTableProps> = ({
                 break;
         }
 
+        if (valA === valB) return 0;
         if (config.search.sortOrder === 'asc') {
             return valA > valB ? 1 : -1;
         } else {
@@ -73,26 +87,45 @@ export const ResultTable: React.FC<ResultTableProps> = ({
     });
 
     useInput((input, key) => {
-        if (!isFocused || flattenedResults.length === 0) return;
+        if (!isFocused) return;
+        
+        if (isFiltering) {
+            if (key.escape || key.return) {
+                setIsFiltering(false);
+            }
+            return;
+        }
+
+        if (flattenedResults.length === 0) return;
+
         let nextIndex = selectedIndex;
         if (key.downArrow || input === 'j') nextIndex = Math.min(selectedIndex + 1, flattenedResults.length - 1);
         else if (key.upArrow || input === 'k') nextIndex = Math.max(selectedIndex - 1, 0);
         else if (input === 'G') nextIndex = flattenedResults.length - 1;
         else if (input === 'g') nextIndex = 0;
+        else if (input === 'f' || input === '/') {
+            setIsFiltering(true);
+            setSelectedIndex(0);
+            setScrollOffset(0);
+            return;
+        }
         else if (input === 'y') {
             const item = flattenedResults[selectedIndex];
+            if (!item) return;
             const parts = item.file.filename.split(/[\\/]/);
             let filename = parts[parts.length - 1] || item.file.filename;
             filename = filename.replace(/\.[^/.]+$/, "").replace(/_/g, " ");
             onYoutube(filename);
         } else if (input === 'd') {
             const item = flattenedResults[selectedIndex];
+            if (!item) return;
             const parts = item.file.filename.split(/[\\/]/);
             let filename = parts[parts.length - 1] || item.file.filename;
             filename = filename.replace(/\.[^/.]+$/, "").replace(/_/g, " ");
             onDiscogs(filename);
         } else if (key.return) {
             const item = flattenedResults[selectedIndex];
+            if (!item) return;
             const fileId = `${item.user}:${item.file.filename}`;
             if (!downloadedIds.has(fileId)) {
                 onDownload(item.user, item.file);
@@ -117,8 +150,21 @@ export const ResultTable: React.FC<ResultTableProps> = ({
     const visibleResults = flattenedResults.slice(scrollOffset, scrollOffset + VIEWPORT_SIZE);
 
     return (
-        <Box flexDirection="column" borderStyle="round" borderColor={isFocused ? THEME.ACCENT : THEME.DIM}>
-            <Box paddingX={1} marginBottom={1}>
+        <Box flexDirection="column" borderStyle="round" borderColor={isFocused ? (isFiltering ? THEME.WARNING : THEME.ACCENT) : THEME.DIM}>
+            
+            {isFiltering && (
+                <Box paddingX={1} borderBottomColor={THEME.DIM} borderBottom={false} marginBottom={0}>
+                    <Text bold color={THEME.WARNING}> Filter: </Text>
+                    {/* @ts-ignore ink-text-input might lack types but works */}
+                    <TextInput 
+                        value={filterText} 
+                        onChange={setFilterText} 
+                        focus={isFiltering} 
+                    />
+                </Box>
+            )}
+
+            <Box paddingX={1} marginBottom={isFiltering ? 1 : 1}>
                 <Box width="15%"><Text bold color={isFocused ? THEME.ACCENT : THEME.DIM}> USER </Text></Box>
                 <Box width="50%"><Text bold color={isFocused ? THEME.ACCENT : THEME.DIM}> FILENAME </Text></Box>
                 <Box width="15%"><Text bold color={isFocused ? THEME.ACCENT : THEME.DIM}> SIZE {config.search.sortBy === 'size' ? (config.search.sortOrder === 'desc' ? '↓' : '↑') : ''} </Text></Box>

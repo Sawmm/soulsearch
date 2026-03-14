@@ -2,21 +2,47 @@
 
 A high-performance, standalone Terminal User Interface (TUI) for the Soulseek network. Built with Node.js, React (Ink), and `slsk-client`.
 
-Designed for crate diggers who want a fast, focused, and visually pleasing way to discover music without leaving the terminal.
+Designed for crate diggers and DJs who want a fast, focused, and visually pleasing way to discover music without leaving the terminal. Optimized for **Ghostty** and high-contrast terminal environments.
 
-![Soulseek TUI Screenshot Placeholder](https://via.placeholder.com/800x400.png?text=Soulseek+TUI+Browser)
+```text
+ ♫ SOULSEEK BROWSER
+ ╭──────────────────────────────────────────────────────────────────╮
+ │ SEARCH artist, album, or song...                                 │
+ ╰──────────────────────────────────────────────────────────────────╯
+ ● Results: 45 users found for "Boards of Canada"
+ ╭──────────────────────────────────────────────────────────────────╮
+ │ USER          FILENAME                        SIZE ↓    SLOTS    │
+ │ music_fan     01 - Wildlife Analysis.mp3      2.4 MB    OPEN     │
+ │ idm_lover     02 - An Eagle In Your Mind.flac 34.1 MB   OPEN     │
+ ╰──────────────────────────────────────────────────────────────────╯
+ [j/k] Scroll  [Enter] DL  [y] YouTube  [d] Discogs  [Tab] Downloads
+```
 
 ## Features
 
 - **Direct Network Access:** Connects directly to the Soulseek network (no `slskd` daemon required).
-- **Instant Search:** Results stream live as they are found on the network.
-- **Audio-Only Focus:** Automatically filters for music files (`.mp3`, `.flac`, `.wav`, etc.).
-- **Smart Sorting:** Automatically sorts results by file size (quality first).
-- **Discogs Integration:** View real release metadata (Label, Genre, Year) directly in the TUI using the Discogs API.
+- **Instant Search:** Results stream live as they are found on the network using throttled updates for smooth performance.
+- **Audio-Only Focus:** Automatically filters for music files (`.mp3`, `.flac`, `.wav`, `.m4a`, `.ogg`, `.aiff`, etc.).
+- **Smart Sorting:** Automatically sorts results by file size (quality first) or bitrate.
+- **Discogs Integration:** View real release metadata (Label, Genre, Year, Style) directly in the TUI without a browser.
 - **YouTube Integration:** Instantly search for a track on YouTube to preview.
-- **Download Manager:** Track multiple downloads with real-time progress bars.
-- **File Sharing:** Share your own collection with the community.
-- **High Contrast:** Optimized for modern terminals like **Ghostty**.
+- **Advanced Download Manager:** 
+    - Track active downloads with real-time, byte-accurate progress bars.
+    - **Visual Strikethrough:** Cancelled or previously downloaded files are visually marked to prevent duplicates.
+    - **Background Transfers:** Multiple downloads can run simultaneously while you continue searching.
+- **Smart Auto-Conversion (DJ Focused):** 
+    - Automatically converts downloads to **Rekordbox/CDJ compatible AIFF** (`pcm_s16be`) or **MP3**.
+    - **Dynamic Quality Logic:** High-quality sources (>= 19.5kHz) are kept lossless (AIFF), while upscaled or low-quality files are converted to MP3 to save space.
+- **Spectral Analysis:** Uses Fast Fourier Transform (FFT) to detect "fake" high-bitrate files by analyzing the actual frequency cutoff.
+- **File Sharing:** Share your own collection with the community by specifying a folder in the config.
+- **Ghostty Optimized:** Custom Dracula-inspired theme designed for readability on dark backgrounds.
+
+## Requirements
+
+- **Node.js:** v18 or higher.
+- **FFmpeg:** Required for audio conversion and spectral analysis.
+    - macOS: `brew install ffmpeg`
+    - Linux: `sudo apt install ffmpeg`
 
 ## Installation
 
@@ -36,7 +62,7 @@ Designed for crate diggers who want a fast, focused, and visually pleasing way t
     npm run build
     ```
 
-4.  **Link the command (Optional):**
+4.  **Link the command:**
     ```bash
     npm link
     ```
@@ -44,7 +70,7 @@ Designed for crate diggers who want a fast, focused, and visually pleasing way t
 
 ## Configuration
 
-Create a configuration file at `~/.config/soulseekbrowser/config.json`:
+The app stores its configuration at `~/.config/soulseekbrowser/config.json`. 
 
 ```json
 {
@@ -53,11 +79,23 @@ Create a configuration file at `~/.config/soulseekbrowser/config.json`:
   "downloadPath": "~/Music/SoulseekDownloads",
   "sharePath": "~/Music/MySharedFolders",
   "portForwarded": false,
-  "discogsToken": "YOUR_DISCOGS_PERSONAL_ACCESS_TOKEN",
+  "discogsToken": "OPTIONAL_DISCOGS_TOKEN",
+  "autoConvert": {
+    "enabled": true,
+    "smartMode": true,
+    "targetFormat": "mp3",
+    "mp3Bitrate": "320k",
+    "detectFakeBitrate": true,
+    "deleteOriginal": true,
+    "normalizeVolume": false,
+    "targetLufs": -14.0,
+    "smartFolders": false
+  },
   "search": {
     "minBitrate": 320,
     "sortBy": "size",
-    "sortOrder": "desc"
+    "sortOrder": "desc",
+    "wishlist": ["joy orbison unreleased", "rare track"]
   },
   "ui": {
     "viewportSize": 15
@@ -65,15 +103,27 @@ Create a configuration file at `~/.config/soulseekbrowser/config.json`:
 }
 ```
 
-### Key Settings:
-- `portForwarded`: Set to `false` (Restricted Mode) if you haven't opened port **2234** on your router. The app will only show "OPEN" slots to ensure downloads actually start.
-- `discogsToken`: Generate one at [Discogs Developer Settings](https://www.discogs.com/settings/developers).
+### Key Settings Explained:
+- `portForwarded`: Set to `false` (Restricted Mode) if you haven't opened port **2234** on your router. The app will only show results with "OPEN" slots to ensure downloads actually start.
+- `autoConvert.smartMode`: If true, high-quality sources become AIFF (CDJ compatible) and low-quality sources become MP3.
+- `autoConvert.detectFakeBitrate`: Runs spectral analysis on downloads to detect upscaled files. The *actual* quality will be shown in the status line.
+- `autoConvert.normalizeVolume`: If `true`, runs the file through FFmpeg's `loudnorm` filter to equalize it to `targetLufs` (default `-14.0`). Essential for DJs so all downloaded tracks play at the exact same perceived volume.
+- `autoConvert.smartFolders`: Automatically parses ID3 metadata and sorts finished files into a `Downloads/Genre/Artist/` hierarchy block.
+- `search.wishlist`: An array of search queries. The app quietly searches for these every 10 minutes in the background and silently snatches >320CBR HQ matches if found.
+- `discogsToken`: (Optional) Generate one at [Discogs Developer Settings](https://www.discogs.com/settings/developers) for 60 req/min limits.
+
+### Ghostty / macOS Troubleshooting
+If `Cmd + Backspace` doesn't clear the search line correctly, add this to your Ghostty config (`~/.config/ghostty/config`):
+```bash
+# Map Cmd+Backspace to standard "kill line" sequence
+keybind = cmd+backspace=text:\x15
+```
 
 ## Keybindings
 
 ### Global
 - **`Tab`**: Toggle between **Search Results** and **Downloads Manager**.
-- **`Esc`**: Refocus the **Search Bar**.
+- **`Esc`**: Toggle focus between **Search Bar** and **Results Table**.
 
 ### Search Bar
 - **`Enter`**: Submit search query.
@@ -83,12 +133,15 @@ Create a configuration file at `~/.config/soulseekbrowser/config.json`:
 ### Results View
 - **`j` / `k`** (or Arrows): Scroll through files.
 - **`g` / `G`**: Jump to Top / Bottom.
+- **`f` / `/`**: Open inline secondary text filter.
 - **`Enter`**: Download selected file.
 - **`y`**: Search track on **YouTube** (browser).
-- **`d`**: View **Discogs** release info (in-app).
+- **`d`**: View **Discogs** release info (in-app overlay).
 
 ### Downloads View
-- **`x`**: Cancel selected active download.
+- **`j` / `k`**: Scroll through download list.
+- **`Spacebar`**: Locally stream/play a downloaded track (requires `ffplay` or macOS `afplay`).
+- **`x`**: Cancel selected active download or conversion.
 - **`c`**: Clear finished/error downloads from the list.
 
 ## License

@@ -63,9 +63,10 @@ export interface DownloadTask {
     username: string;
     size: number;
     progress: number;
-    status: 'downloading' | 'completed' | 'error';
+    status: 'downloading' | 'completed' | 'error' | 'converting';
     localPath?: string;
     errorMessage?: string;
+    conversionInfo?: string;
 }
 
 /**
@@ -93,11 +94,23 @@ export interface AppConfig {
     sharePath: string;
     portForwarded: boolean;
     discogsToken?: string;
+    autoConvert: {
+        enabled: boolean;
+        smartMode: boolean; // Dynamic MP3/AIFF based on quality
+        targetFormat: 'mp3' | 'aiff'; // Default if not in smart mode
+        mp3Bitrate: string; // e.g. '320k'
+        detectFakeBitrate: boolean;
+        deleteOriginal: boolean;
+        normalizeVolume: boolean;
+        targetLufs: number;
+        smartFolders: boolean;
+    };
     search: {
         audioExtensions: string[];
         minBitrate: number;
         sortBy: 'size' | 'bitrate' | 'user';
         sortOrder: 'asc' | 'desc';
+        wishlist: string[];
     };
     ui: {
         viewportSize: number;

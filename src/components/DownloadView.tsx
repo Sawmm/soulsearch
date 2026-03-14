@@ -8,6 +8,7 @@ interface DownloadViewProps {
     isFocused?: boolean;
     onCancel: (id: string) => void;
     onClear: () => void;
+    onPlay: (localPath: string, filename: string) => void;
 }
 
 const formatSize = (bytes: number): string => {
@@ -18,7 +19,7 @@ const formatSize = (bytes: number): string => {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 };
 
-export const DownloadView: React.FC<DownloadViewProps> = ({ downloads, isFocused = false, onCancel, onClear }) => {
+export const DownloadView: React.FC<DownloadViewProps> = ({ downloads, isFocused = false, onCancel, onClear, onPlay }) => {
     const [selectedIndex, setSelectedIndex] = useState(0);
     const [scrollOffset, setScrollOffset] = useState(0);
     const VIEWPORT_SIZE = 15;
@@ -38,6 +39,11 @@ export const DownloadView: React.FC<DownloadViewProps> = ({ downloads, isFocused
             onCancel(downloads[selectedIndex].id);
         } else if (input === 'c') {
             onClear();
+        } else if (input === ' ') {
+            const task = downloads[selectedIndex];
+            if (task && task.status === 'completed' && task.localPath) {
+                onPlay(task.localPath, task.filename);
+            }
         }
 
         if (nextIndex !== selectedIndex) {
@@ -63,16 +69,17 @@ export const DownloadView: React.FC<DownloadViewProps> = ({ downloads, isFocused
     return (
         <Box flexDirection="column" borderStyle="round" borderColor={isFocused ? THEME.ACCENT : THEME.DIM}>
             <Box paddingX={1} marginBottom={1}>
-                <Box width="40%"><Text bold color={isFocused ? THEME.ACCENT : THEME.DIM}> FILENAME </Text></Box>
-                <Box width="15%"><Text bold color={isFocused ? THEME.ACCENT : THEME.DIM}> USER </Text></Box>
-                <Box width="15%"><Text bold color={isFocused ? THEME.ACCENT : THEME.DIM}> SIZE </Text></Box>
+                <Box width="30%"><Text bold color={isFocused ? THEME.ACCENT : THEME.DIM}> FILENAME </Text></Box>
+                <Box width="10%"><Text bold color={isFocused ? THEME.ACCENT : THEME.DIM}> USER </Text></Box>
                 <Box width="20%"><Text bold color={isFocused ? THEME.ACCENT : THEME.DIM}> PROGRESS </Text></Box>
+                <Box width="30%"><Text bold color={isFocused ? THEME.ACCENT : THEME.DIM}> CONVERSION </Text></Box>
                 <Box width="10%"><Text bold color={isFocused ? THEME.ACCENT : THEME.DIM}> STATUS </Text></Box>
             </Box>
             
             {visibleDownloads.map((task, index) => {
                 const actualIndex = scrollOffset + index;
                 const isSelected = isFocused && actualIndex === selectedIndex;
+                const isCancelled = task.status === 'error' && task.errorMessage === 'Cancelled by user';
                 
                 let statusColor = THEME.INFO;
                 if (task.status === "completed") statusColor = THEME.SUCCESS;
@@ -82,16 +89,23 @@ export const DownloadView: React.FC<DownloadViewProps> = ({ downloads, isFocused
                     <Box key={task.id} 
                          paddingX={1}
                          backgroundColor={isSelected ? THEME.BG_SELECT : undefined}>
-                        <Box width="40%">
-                            <Text color={isSelected ? THEME.PRIMARY : (isFocused ? THEME.PRIMARY : THEME.DIM)} wrap="truncate" bold={isSelected}>
+                        <Box width="30%">
+                            <Text color={isSelected ? THEME.PRIMARY : (isFocused ? THEME.PRIMARY : THEME.DIM)} 
+                                  wrap="truncate" 
+                                  bold={isSelected}
+                                  strikethrough={isCancelled}>
                                 {isSelected ? '▶ ' : ''}{task.filename}
                             </Text>
                         </Box>
-                        <Box width="15%"><Text color={isFocused ? THEME.INFO : THEME.DIM} wrap="truncate">{task.username}</Text></Box>
-                        <Box width="15%"><Text color={isFocused ? THEME.PRIMARY : THEME.DIM}>{formatSize(task.size)}</Text></Box>
+                        <Box width="10%"><Text color={isFocused ? THEME.INFO : THEME.DIM} wrap="truncate" strikethrough={isCancelled}>{task.username}</Text></Box>
                         <Box width="20%">
                             <Text color={isFocused ? THEME.PRIMARY : THEME.DIM}>
-                                {`[${"█".repeat(Math.floor(task.progress / 10))}${" ".repeat(10 - Math.floor(task.progress / 10))}] ${task.progress}%`}
+                                {isCancelled ? '[ CANCELLED ]' : `[${"█".repeat(Math.floor(task.progress / 10))}${" ".repeat(10 - Math.floor(task.progress / 10))}] ${task.progress}%`}
+                            </Text>
+                        </Box>
+                        <Box width="30%">
+                            <Text color={isFocused ? THEME.WARNING : THEME.DIM} wrap="truncate" strikethrough={isCancelled}>
+                                {task.conversionInfo || (task.status === "completed" ? "Original" : "")}
                             </Text>
                         </Box>
                         <Box width="10%">
@@ -103,7 +117,7 @@ export const DownloadView: React.FC<DownloadViewProps> = ({ downloads, isFocused
             
             <Box paddingX={1} paddingTop={1} justifyContent="space-between">
                 <Text color={THEME.DIM}> 
-                    {isFocused ? '[x] Cancel  [c] Clear Finished  [Tab] Results' : 'Tab to view results'}
+                    {isFocused ? '[x] Cancel  [c] Clear  [Space] Play  [Tab] Results' : 'Tab to view results'}
                 </Text>
                 <Text color={THEME.INFO}>
                     {selectedIndex + 1}/{downloads.length}

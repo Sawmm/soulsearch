@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useRef } from 'react';
 import { Box, Text, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 import { THEME } from '../theme.js';
@@ -11,33 +11,31 @@ interface SearchInputProps {
 }
 
 export const SearchInput: React.FC<SearchInputProps> = ({ value, onChange, onSubmit, isFocused = true }) => {
-    // Intercept special deletion keys before they reach TextInput
+    const lastClearedTime = useRef(0);
+
+    // High-level input interceptor
     useInput((input, key) => {
         if (!isFocused) return;
 
-        // Sequence mapping for different terminals/OS
-        // ghostty/macOS specific handling
-        const isWordDelete = 
-            (key.backspace && (key.ctrl || key.meta)) || 
-            input === '\u0017' || // Ctrl+W
-            input === '\u001b\u007f' || // Alt+Backspace (macOS)
-            input === '\u001b\u0008';
+        // Ghostty/macOS specific: Cmd+Backspace often sends standard Ctrl+U (\x15)
+        // or a combination that Ink parses as key.ctrl + 'u'
+        const isKillLine = input === '\x15' || (key.ctrl && input === 'u') || (key.meta && key.backspace);
+        const isDeleteWord = input === '\x17' || input === '\x1b\x7f' || input === '\x1b\x08';
 
-        const isLineDelete = 
-            input === '\u0015' || // Ctrl+U (Standard)
-            (key.ctrl && input === 'u') || // Literal Ctrl+U interpretation
-            (key.meta && key.backspace); // Cmd+Backspace mapping
-
-        if (isLineDelete) {
-            // Use a slight delay to allow any pending TextInput updates to settle, 
-            // then force the clear. This prevents the "u" from appearing.
-            process.nextTick(() => onChange(''));
+        if (isKillLine) {
+            // The "Easy Fix": Simply clear the state. 
+            // To prevent the 'u' from leaking in, we track the timestamp.
+            lastClearedTime.current = Date.now();
+            onChange('');
+            // Double-tap the clear to ensure TextInput's internal state doesn't win
+            setTimeout(() => onChange(''), 0);
             return;
         }
 
-        if (isWordDelete) {
+        if (isDeleteWord) {
             const newValue = value.replace(/(\s*\S+\s*)$/, '');
-            process.nextTick(() => onChange(newValue));
+            onChange(newValue);
+            setTimeout(() => onChange(newValue), 0);
             return;
         }
     });
@@ -49,7 +47,15 @@ export const SearchInput: React.FC<SearchInputProps> = ({ value, onChange, onSub
                 {isFocused ? (
                     <TextInput
                         value={value}
-                        onChange={onChange}
+                        onChange={(nextValue) => {
+                            // The "Race Condition" Filter:
+                            // If we just cleared the line, ignore the stray 'u' 
+                            // that TextInput might try to append from the Ctrl+U event.
+                            if (nextValue === 'u' && value === '' && Date.now() - lastClearedTime.current < 50) {
+                                return;
+                            }
+                            onChange(nextValue);
+                        }}
                         onSubmit={onSubmit}
                         placeholder="artist, album, or song..."
                     />

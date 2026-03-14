@@ -21,3 +21,5 @@ agent.md
 # Users should create this manually or from a template
 # We ignore the actual config to protect credentials
 config.json
+*.mp3
+test/
