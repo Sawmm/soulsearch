@@ -115,14 +115,6 @@ The app stores its configuration at `~/.config/soulseekbrowser/config.json`.
 | `search.wishlist` | Array of search queries. The app searches for these every 10 minutes in the background and silently downloads >320CBR matches if found. |
 | `discogsToken` | (Optional) Generate one at [Discogs Developer Settings](https://www.discogs.com/settings/developers) for a 60 req/min rate limit. |
 
-### Ghostty / macOS Troubleshooting
-
-If `Cmd + Backspace` doesn't clear the search line correctly, add this to your Ghostty config (`~/.config/ghostty/config`):
-
-```bash
-# Map Cmd+Backspace to standard "kill line" sequence
-keybind = cmd+backspace=text:\x15
-```
 
 ## Keybindings
 
