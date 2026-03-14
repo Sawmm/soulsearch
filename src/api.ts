@@ -8,7 +8,7 @@ import { SearchResult, SearchResultFile, AppConfig, DiscogsResult } from './type
 
 let client: any = null;
 let connectionPromise: Promise<void> | null = null;
-const activeDownloads = new Map<string, { stream?: any, writeStream?: fs.WriteStream }>();
+const activeDownloads = new Map<string, { stream?: any, writeStream?: fs.WriteStream, rejectPromise?: (err: Error) => void }>();
 
 const CONFIG_PATH = path.join(os.homedir(), '.config', 'soulseekbrowser', 'config.json');
 
@@ -208,7 +208,7 @@ export async function downloadFile(
             if (err) return reject(new Error(err.message || 'Download failed to start'));
 
             const writeStream = fs.createWriteStream(localPath);
-            activeDownloads.set(id, { stream, writeStream });
+            activeDownloads.set(id, { stream, writeStream, rejectPromise: reject });
 
             let downloadedBytes = 0;
             stream.on('data', (chunk: Buffer) => {
@@ -251,6 +251,10 @@ function cleanupDownload(id: string, localPath?: string) {
 }
 
 export function cancelDownload(id: string, localPath?: string) {
+    const active = activeDownloads.get(id);
+    if (active && active.rejectPromise) {
+        active.rejectPromise(new Error('Cancelled by user'));
+    }
     cleanupDownload(id, localPath);
 }
 

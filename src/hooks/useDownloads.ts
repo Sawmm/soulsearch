@@ -89,6 +89,7 @@ export function useDownloads(
             }
         })
         .catch((err) => {
+            if (err.message === 'Cancelled by user') return;
             setDownloads(prev => prev.map(t => 
                 t.id === taskId ? { ...t, status: 'error', errorMessage: err.message } : t
             ));
