@@ -18,15 +18,15 @@ export const DownloadView: React.FC<DownloadViewProps> = ({ downloads, isFocused
     const VIEWPORT_SIZE = 15;
 
     useEffect(() => {
-        if (downloads.length === 0) {
+        const len = downloads.length;
+        if (len === 0) {
             setSelectedIndex(0);
             setScrollOffset(0);
-        } else if (selectedIndex >= downloads.length) {
-            const clamped = downloads.length - 1;
-            setSelectedIndex(clamped);
-            if (clamped < scrollOffset) setScrollOffset(clamped);
+        } else {
+            setSelectedIndex(prev => Math.min(prev, len - 1));
+            setScrollOffset(prev => Math.min(prev, Math.max(0, len - VIEWPORT_SIZE)));
         }
-    }, [downloads.length, selectedIndex, scrollOffset]);
+    }, [downloads.length]);
 
     useInput((input, key) => {
         if (!isFocused || downloads.length === 0) {

@@ -80,15 +80,15 @@ export const ResultTable: React.FC<ResultTableProps> = ({
     });
 
     useEffect(() => {
-        if (flattenedResults.length === 0) {
+        const len = flattenedResults.length;
+        if (len === 0) {
             setSelectedIndex(0);
             setScrollOffset(0);
-        } else if (selectedIndex >= flattenedResults.length) {
-            const clamped = flattenedResults.length - 1;
-            setSelectedIndex(clamped);
-            if (clamped < scrollOffset) setScrollOffset(clamped);
+        } else {
+            setSelectedIndex(prev => Math.min(prev, len - 1));
+            setScrollOffset(prev => Math.min(prev, Math.max(0, len - VIEWPORT_SIZE)));
         }
-    }, [flattenedResults.length, selectedIndex, scrollOffset]);
+    }, [flattenedResults.length, VIEWPORT_SIZE]);
 
     useInput((input, key) => {
         if (!isFocused) return;
