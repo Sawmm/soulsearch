@@ -43,111 +43,139 @@ export async function applySmartFolders(localPath: string, config: AppConfig): P
 }
 
 /**
- * Detects the "actual" bitrate of an audio file using spectral analysis.
+ * Detects the "actual" bitrate of an audio file using the FakeFLAC method:
+ * Re-encodes the file to 320k MP3 and back, then compares the max frequency
+ * above 14kHz between the original and the re-encoded version.
+ * If they match → it's a fake lossless. If original is higher → genuine.
  */
 export async function detectActualBitrate(filePath: string): Promise<{ maxFrequency: number; estimatedBitrate: string; isHighQuality: boolean }> {
-    return new Promise((resolve, reject) => {
-        const sampleRate = 44100;
-        const fftSize = 4096;
+    const sampleRate = 44100;
+    const fftSize = 4096;
+    const MIN_ANALYSIS_FREQ = 14000; // FakeFLAC scans from 14kHz upwards
+
+    /**
+     * Reads raw PCM s16le samples from a file path into a Float32Array.
+     * Optionally re-encodes through 320k MP3 first (the "fake lossless" path).
+     */
+    function getPCMData(inputPath: string, throughMp3: boolean): Promise<Float32Array> {
+        return new Promise((resolve, reject) => {
+            let srcCommand = ffmpeg(inputPath).noVideo().audioChannels(1).audioFrequency(sampleRate);
+
+            // If we need the "fake lossless" version, pipe through MP3 encoding first
+            if (throughMp3) {
+                // Chain: original → MP3 320k → PCM s16le
+                const mp3Pipe = ffmpeg(inputPath)
+                    .noVideo()
+                    .audioChannels(1)
+                    .audioFrequency(sampleRate)
+                    .toFormat('mp3')
+                    .audioBitrate('320k')
+                    .pipe();
+
+                srcCommand = ffmpeg(mp3Pipe as any)
+                    .noVideo()
+                    .inputFormat('mp3')
+                    .audioChannels(1)
+                    .audioFrequency(sampleRate);
+            }
+
+            const chunks: Buffer[] = [];
+            const stream = srcCommand.toFormat('s16le').pipe();
+
+            stream.on('data', (chunk: Buffer) => chunks.push(chunk));
+            stream.on('error', reject);
+            stream.on('end', () => {
+                const raw = Buffer.concat(chunks);
+                const samples = new Float32Array(raw.length / 2);
+                for (let i = 0; i < samples.length; i++) {
+                    samples[i] = raw.readInt16LE(i * 2) / 32768;
+                }
+                resolve(samples);
+            });
+        });
+    }
+
+    /**
+     * Given PCM samples, compute average power spectrum and find the max
+     * frequency that has meaningful signal above 14kHz (FakeFLAC method).
+     */
+    function getMaxHighFrequency(samples: Float32Array): number {
         const fft = new FFT(fftSize);
-        const threshold = -65; // dB threshold for cutoff
-
-        const averageSpectrum = new Float32Array(fftSize / 2);
+        const powerSpectrum = new Float32Array(fftSize / 2).fill(0);
         let numBlocks = 0;
-        let leftOver = Buffer.alloc(0);
 
-        const stream = ffmpeg(filePath)
-            .noVideo() // Prevent video/cover-art stream errors
-            .format('s16le') // Raw 16-bit PCM
-            .audioChannels(1)
-            .audioFrequency(sampleRate)
-            .on('error', reject)
-            .pipe();
+        for (let offset = 0; offset + fftSize <= samples.length; offset += fftSize) {
+            const block = samples.subarray(offset, offset + fftSize);
+            const out = fft.createComplexArray();
+            fft.realTransform(out, block);
 
-        stream.on('data', (chunk: Buffer) => {
-            const currentBuffer = Buffer.concat([leftOver, chunk]);
-            const bytesPerBlock = fftSize * 2; // 16-bit = 2 bytes per sample
-            let offset = 0;
-
-            while (offset + bytesPerBlock <= currentBuffer.length) {
-                const blockBuffer = currentBuffer.subarray(offset, offset + bytesPerBlock);
-                const pcmData = new Float32Array(fftSize);
-                for (let i = 0; i < fftSize; i++) {
-                    pcmData[i] = blockBuffer.readInt16LE(i * 2) / 32768;
-                }
-
-                const out = fft.createComplexArray();
-                fft.realTransform(out, pcmData);
-
-                for (let j = 0; j < fftSize / 2; j++) {
-                    const real = out[j * 2];
-                    const imag = out[j * 2 + 1];
-                    averageSpectrum[j] += Math.sqrt(real * real + imag * imag);
-                }
-                numBlocks++;
-                offset += bytesPerBlock;
-            }
-            leftOver = currentBuffer.subarray(offset);
-        });
-
-        stream.on('end', () => {
-            if (numBlocks === 0) {
-                return resolve({ maxFrequency: 0, estimatedBitrate: 'Unknown', isHighQuality: false });
-            }
-
-            // Average the spectrum across all blocks, convert to dB
-            const dbSpectrum = new Float32Array(fftSize / 2);
             for (let j = 0; j < fftSize / 2; j++) {
-                const avgMag = averageSpectrum[j] / numBlocks;
-                dbSpectrum[j] = 20 * Math.log10(avgMag + 1e-6);
+                const real = out[j * 2];
+                const imag = out[j * 2 + 1];
+                powerSpectrum[j] += real * real + imag * imag; // accumulate power
             }
+            numBlocks++;
+        }
 
-            // 1. Compute a stable reference level from the mid-frequency range (1kHz - 5kHz).
-            //    This range always has strong signal for music and is unaffected by lossy cutoffs.
-            const refBinStart = Math.floor(1000 * fftSize / sampleRate);
-            const refBinEnd = Math.floor(5000 * fftSize / sampleRate);
-            let refSum = 0;
-            for (let j = refBinStart; j <= refBinEnd; j++) {
-                refSum += dbSpectrum[j];
+        if (numBlocks === 0) return 0;
+
+        // Average over blocks, convert to dB
+        const dbSpectrum = new Float32Array(fftSize / 2);
+        for (let j = 0; j < fftSize / 2; j++) {
+            dbSpectrum[j] = 10 * Math.log10(powerSpectrum[j] / numBlocks + 1e-10);
+        }
+
+        // Find threshold: mean power of all bins above 14kHz
+        const minBin = Math.floor(MIN_ANALYSIS_FREQ * fftSize / sampleRate);
+        let sum = 0;
+        for (let j = minBin; j < fftSize / 2; j++) sum += dbSpectrum[j];
+        const meanDb = sum / (fftSize / 2 - minBin);
+
+        // Max useful frequency: highest bin above 14kHz that is significantly
+        // above the mean (i.e. has actual signal, not just noise floor)
+        const SIGNAL_THRESHOLD = meanDb + 10; // 10dB above noise
+        let maxBin = minBin;
+        for (let j = fftSize / 2 - 1; j >= minBin; j--) {
+            if (dbSpectrum[j] > SIGNAL_THRESHOLD) {
+                maxBin = j;
+                break;
             }
-            const refLevel = refSum / (refBinEnd - refBinStart + 1);
+        }
 
-            // 2. Scan from the top (Nyquist) downwards to find the first bin that is
-            //    within 30dB of the mid-frequency reference.
-            //    - For a genuine FLAC peaking at 22kHz: the very first bin (top) will be
-            //      within 30dB of the reference → cutoff detected near 22kHz → High Quality.
-            //    - For a fake FLAC (MP3→FLAC): bins above ~16kHz will be >30dB below the
-            //      reference (just residual noise) → cutoff detected much lower → Fake.
-            const DROP_THRESHOLD_DB = 30;
-            let detectedCutoffBin = 0;
-            const topBin = Math.floor(22000 * fftSize / sampleRate);
+        return (maxBin * sampleRate) / fftSize;
+    }
 
-            for (let j = topBin; j >= 0; j--) {
-                if (dbSpectrum[j] > refLevel - DROP_THRESHOLD_DB) {
-                    detectedCutoffBin = j;
-                    break;
-                }
-            }
+    try {
+        // Run both analyses in parallel (FakeFLAC approach)
+        const [originalSamples, fakeSamples] = await Promise.all([
+            getPCMData(filePath, false),
+            getPCMData(filePath, true)
+        ]);
 
-            const maxFrequency = (detectedCutoffBin * sampleRate) / fftSize;
+        const originalMaxFreq = getMaxHighFrequency(originalSamples);
+        const fakeMaxFreq = getMaxHighFrequency(fakeSamples);
 
-            let estimated = 'Unknown';
-            let isHighQuality = false;
-            
-            if (maxFrequency >= 19500) {
-                estimated = 'High Quality (320k/Lossless)';
-                isHighQuality = true;
-            } else if (maxFrequency >= 18000) {
-                estimated = 'Good (256k)';
-            } else if (maxFrequency >= 15500) {
-                estimated = 'Medium (128k-192k)';
-            } else {
-                estimated = 'Low Quality / Fake';
-            }
+        // Key FakeFLAC logic: compare the two max frequencies.
+        // If original ≈ fake → the file was already lossy (fake lossless).
+        // If original > fake by a meaningful margin → it's genuinely lossless.
+        const freqDiff = originalMaxFreq - fakeMaxFreq;
+        const isHighQuality = freqDiff > 1000; // >1kHz gap means genuine high-freq content
 
-            resolve({ maxFrequency, estimatedBitrate: estimated, isHighQuality });
-        });
-    });
+        let estimatedBitrate: string;
+        if (!isHighQuality) {
+            // Original and fake match → already a lossy source
+            if (fakeMaxFreq < 15500) estimatedBitrate = 'Low Quality / Fake';
+            else if (fakeMaxFreq < 18000) estimatedBitrate = 'Medium (128k-192k)';
+            else estimatedBitrate = 'Good (256k)';
+        } else {
+            estimatedBitrate = 'High Quality (320k/Lossless)';
+        }
+
+        return { maxFrequency: originalMaxFreq, estimatedBitrate, isHighQuality };
+    } catch (e) {
+        // Fallback if FFmpeg pipe chaining fails
+        return { maxFrequency: 0, estimatedBitrate: 'Unknown', isHighQuality: false };
+    }
 }
 
 /**

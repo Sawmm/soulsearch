@@ -106,7 +106,7 @@ The app stores its configuration at `~/.config/soulseekbrowser/config.json`.
 ### Key Settings Explained:
 - `portForwarded`: Set to `false` (Restricted Mode) if you haven't opened port **2234** on your router. The app will only show results with "OPEN" slots to ensure downloads actually start.
 - `autoConvert.smartMode`: If true, high-quality sources become AIFF (CDJ compatible) and low-quality sources become MP3.
-- `autoConvert.detectFakeBitrate`: Runs spectral analysis on downloads to detect upscaled files. The *actual* quality will be shown in the status line.
+- `autoConvert.detectFakeBitrate`: Uses the **FakeFLAC method** to detect upscaled fake lossless files. The file is re-encoded through 320k MP3 and back, then both versions are spectrally analysed above 14kHz. If the original and the re-encoded version have the same max frequency, the source was already lossy (fake). The *actual* quality is shown in the Downloads `CONVERSION` column.
 - `autoConvert.normalizeVolume`: If `true`, runs the file through FFmpeg's `loudnorm` filter to equalize it to `targetLufs` (default `-14.0`). Essential for DJs so all downloaded tracks play at the exact same perceived volume.
 - `autoConvert.smartFolders`: Automatically parses ID3 metadata and sorts finished files into a `Downloads/Genre/Artist/` hierarchy block.
 - `search.wishlist`: An array of search queries. The app quietly searches for these every 10 minutes in the background and silently snatches >320CBR HQ matches if found.
