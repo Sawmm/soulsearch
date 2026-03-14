@@ -34,11 +34,21 @@ export async function applySmartFolders(localPath: string, config: AppConfig): P
         
         const finalPath = path.join(targetDir, path.basename(localPath));
         if (localPath !== finalPath) {
-            fs.renameSync(localPath, finalPath);
+            try {
+                fs.renameSync(localPath, finalPath);
+            } catch (renameErr: any) {
+                // If EXDEV (cross-device link not permitted), fallback to copy+delete
+                if (renameErr.code === 'EXDEV') {
+                    fs.copyFileSync(localPath, finalPath);
+                    fs.unlinkSync(localPath);
+                } else {
+                    throw renameErr;
+                }
+            }
             return finalPath;
         }
     } catch (e) {
-        // Fallback to original path if metadata completely fails
+        // Fallback to original path if metadata or move fails
     }
     return localPath;
 }
@@ -55,18 +65,21 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
     const MIN_ANALYSIS_FREQ = 14000; // FakeFLAC scans from 14kHz upwards
 
     /**
-     * Reads raw PCM s16le samples from a file path into a Float32Array.
-     * If throughMp3 is true, first re-encodes to 320k MP3 via a temp file
-     * (the "fake lossless" roundtrip). Using a temp file is required here
-     * because fluent-ffmpeg cannot consume another ffmpeg pipe as input.
+     * Reads PCM s16le chunks from a file path and processes the FFT incrementally.
+     * If throughMp3 is true, first re-encodes to 320k MP3 via a temp file.
+     * This chunked streaming prevents Out Of Memory (OOM) errors on large 24-bit FLACs.
      */
-    function getPCMData(inputPath: string, throughMp3: boolean): Promise<Float32Array> {
+    function processSpectralStream(inputPath: string, throughMp3: boolean): Promise<number> {
         return new Promise(async (resolve, reject) => {
-            const decodeToSamples = (srcPath: string) => {
-                return new Promise<Float32Array>((res, rej) => {
-                    const chunks: Buffer[] = [];
-                    // IMPORTANT: attach 'error' to the FfmpegCommand, not the pipe stream,
-                    // because fluent-ffmpeg emits errors on the command object.
+            const runFFTStream = (srcPath: string) => {
+                return new Promise<number>((res, rej) => {
+                    const fft = new FFT(fftSize);
+                    const powerSpectrum = new Float32Array(fftSize / 2).fill(0);
+                    let numBlocks = 0;
+                    
+                    let leftoverBuffer = Buffer.alloc(0);
+                    const blockSizeBytes = fftSize * 2; // 16-bit PCM = 2 bytes per sample
+
                     const cmd = ffmpeg(srcPath)
                         .noVideo()
                         .audioChannels(1)
@@ -75,30 +88,73 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
                         .on('error', rej);
 
                     const stream = cmd.pipe();
-                    stream.on('data', (chunk: Buffer) => chunks.push(chunk));
-                    stream.on('end', () => {
-                        const raw = Buffer.concat(chunks);
-                        const samples = new Float32Array(raw.length / 2);
-                        for (let i = 0; i < samples.length; i++) {
-                            samples[i] = raw.readInt16LE(i * 2) / 32768;
+                    
+                    stream.on('data', (chunk: Buffer) => {
+                        let currentBuffer = Buffer.concat([leftoverBuffer, chunk]);
+                        
+                        while (currentBuffer.length >= blockSizeBytes) {
+                            const blockRaw = currentBuffer.subarray(0, blockSizeBytes);
+                            currentBuffer = currentBuffer.subarray(blockSizeBytes);
+                            
+                            const samples = new Float32Array(fftSize);
+                            for (let i = 0; i < fftSize; i++) {
+                                samples[i] = blockRaw.readInt16LE(i * 2) / 32768;
+                            }
+                            
+                            const out = fft.createComplexArray();
+                            fft.realTransform(out, samples);
+
+                            for (let j = 0; j < fftSize / 2; j++) {
+                                const real = out[j * 2];
+                                const imag = out[j * 2 + 1];
+                                powerSpectrum[j] += real * real + imag * imag;
+                            }
+                            numBlocks++;
                         }
-                        res(samples);
+                        leftoverBuffer = currentBuffer;
+                    });
+                    
+                    stream.on('end', () => {
+                        if (numBlocks === 0) return res(0);
+
+                        // Average over blocks, convert to dB
+                        const dbSpectrum = new Float32Array(fftSize / 2);
+                        for (let j = 0; j < fftSize / 2; j++) {
+                            dbSpectrum[j] = 10 * Math.log10(powerSpectrum[j] / numBlocks + 1e-10);
+                        }
+
+                        // Find threshold: mean power of all bins above 14kHz
+                        const minBin = Math.floor(MIN_ANALYSIS_FREQ * fftSize / sampleRate);
+                        let sum = 0;
+                        for (let j = minBin; j < fftSize / 2; j++) sum += dbSpectrum[j];
+                        const meanDb = sum / (fftSize / 2 - minBin);
+
+                        // Max useful frequency: highest bin above 14kHz that is significantly
+                        // above the mean (has actual signal)
+                        const SIGNAL_THRESHOLD = meanDb + 10; // 10dB above noise
+                        let maxBin = minBin;
+                        for (let j = fftSize / 2 - 1; j >= minBin; j--) {
+                            if (dbSpectrum[j] > SIGNAL_THRESHOLD) {
+                                maxBin = j;
+                                break;
+                            }
+                        }
+
+                        res((maxBin * sampleRate) / fftSize);
                     });
                 });
             };
 
             if (!throughMp3) {
                 try {
-                    resolve(await decodeToSamples(inputPath));
+                    resolve(await runFFTStream(inputPath));
                 } catch (e) { reject(e); }
                 return;
             }
 
-            // Two-stage: encode to a temp MP3 on disk, then decode to PCM.
-            // We use os.tmpdir() + a unique suffix to avoid collisions.
+            // Two-stage: encode to a temp MP3 on disk, then decode and stream to FFT.
             const tmpMp3 = path.join(os.tmpdir(), `slsk_fakecheck_${Date.now()}.mp3`);
             try {
-                // Stage 1: input → 320k MP3 temp file
                 await new Promise<void>((res, rej) => {
                     ffmpeg(inputPath)
                         .noVideo()
@@ -111,9 +167,8 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
                         .save(tmpMp3);
                 });
 
-                // Stage 2: temp MP3 → PCM samples
-                const samples = await decodeToSamples(tmpMp3);
-                resolve(samples);
+                const maxFreq = await runFFTStream(tmpMp3);
+                resolve(maxFreq);
             } catch (e) {
                 reject(e);
             } finally {
@@ -122,66 +177,12 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
         });
     }
 
-
-    /**
-     * Given PCM samples, compute average power spectrum and find the max
-     * frequency that has meaningful signal above 14kHz (FakeFLAC method).
-     */
-    function getMaxHighFrequency(samples: Float32Array): number {
-        const fft = new FFT(fftSize);
-        const powerSpectrum = new Float32Array(fftSize / 2).fill(0);
-        let numBlocks = 0;
-
-        for (let offset = 0; offset + fftSize <= samples.length; offset += fftSize) {
-            const block = samples.subarray(offset, offset + fftSize);
-            const out = fft.createComplexArray();
-            fft.realTransform(out, block);
-
-            for (let j = 0; j < fftSize / 2; j++) {
-                const real = out[j * 2];
-                const imag = out[j * 2 + 1];
-                powerSpectrum[j] += real * real + imag * imag; // accumulate power
-            }
-            numBlocks++;
-        }
-
-        if (numBlocks === 0) return 0;
-
-        // Average over blocks, convert to dB
-        const dbSpectrum = new Float32Array(fftSize / 2);
-        for (let j = 0; j < fftSize / 2; j++) {
-            dbSpectrum[j] = 10 * Math.log10(powerSpectrum[j] / numBlocks + 1e-10);
-        }
-
-        // Find threshold: mean power of all bins above 14kHz
-        const minBin = Math.floor(MIN_ANALYSIS_FREQ * fftSize / sampleRate);
-        let sum = 0;
-        for (let j = minBin; j < fftSize / 2; j++) sum += dbSpectrum[j];
-        const meanDb = sum / (fftSize / 2 - minBin);
-
-        // Max useful frequency: highest bin above 14kHz that is significantly
-        // above the mean (i.e. has actual signal, not just noise floor)
-        const SIGNAL_THRESHOLD = meanDb + 10; // 10dB above noise
-        let maxBin = minBin;
-        for (let j = fftSize / 2 - 1; j >= minBin; j--) {
-            if (dbSpectrum[j] > SIGNAL_THRESHOLD) {
-                maxBin = j;
-                break;
-            }
-        }
-
-        return (maxBin * sampleRate) / fftSize;
-    }
-
     try {
-        // Run both analyses in parallel (FakeFLAC approach)
-        const [originalSamples, fakeSamples] = await Promise.all([
-            getPCMData(filePath, false),
-            getPCMData(filePath, true)
+        // Run both analyses in parallel (Chunked API)
+        const [originalMaxFreq, fakeMaxFreq] = await Promise.all([
+            processSpectralStream(filePath, false),
+            processSpectralStream(filePath, true)
         ]);
-
-        const originalMaxFreq = getMaxHighFrequency(originalSamples);
-        const fakeMaxFreq = getMaxHighFrequency(fakeSamples);
 
         // Key FakeFLAC logic: compare the two max frequencies.
         // If original ≈ fake → the file was already lossy (fake lossless).

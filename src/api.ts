@@ -7,6 +7,7 @@ import slsk from 'slsk-client';
 import { SearchResult, SearchResultFile, AppConfig, DiscogsResult } from './types.js';
 
 let client: any = null;
+let connectionPromise: Promise<void> | null = null;
 const activeDownloads = new Map<string, { stream?: any, writeStream?: fs.WriteStream }>();
 
 const CONFIG_PATH = path.join(os.homedir(), '.config', 'soulseekbrowser', 'config.json');
@@ -81,20 +82,46 @@ const CONFIG = loadConfig();
 
 export async function ensureConnected(): Promise<void> {
     if (client) return;
+    if (connectionPromise) return connectionPromise;
+
     if (!CONFIG.username || !CONFIG.password) {
         throw new Error('Username and password must be set in config.json or environment variables');
     }
-    return new Promise((resolve, reject) => {
+
+    connectionPromise = new Promise((resolve, reject) => {
         const connectOptions: any = { user: CONFIG.username, pass: CONFIG.password };
         if (CONFIG.sharePath && fs.existsSync(CONFIG.sharePath)) {
             connectOptions.sharedFolders = [CONFIG.sharePath];
         }
+
         slsk.connect(connectOptions, (err: any, res: any) => {
-            if (err) return reject(err);
+            if (err) {
+                connectionPromise = null;
+                return reject(err);
+            }
             client = res;
+            
+            // Connection Heartbeat / Reconnection Logic
+            const handleDisconnect = () => {
+                if (client) {
+                    try { client.destroy(); } catch (e) {}
+                    client = null;
+                }
+                // Silently attempt to reconnect in the background after 5s
+                setTimeout(() => {
+                    ensureConnected().catch(() => {});
+                }, 5000);
+            };
+
+            client.on('error', handleDisconnect);
+            client.on('disconnect', handleDisconnect);
+
+            connectionPromise = null;
             resolve();
         });
     });
+
+    return connectionPromise;
 }
 
 export function getAppConfig(): AppConfig {

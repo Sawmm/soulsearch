@@ -9,7 +9,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "test": "vitest run"
   },
   "dependencies": {
     "cli-table3": "^0.6.5",
@@ -27,6 +28,7 @@
     "@types/fluent-ffmpeg": "^2.1.28",
     "@types/node": "^22.19.15",
     "@types/react": "^19.2.14",
-    "typescript": "^5.5.4"
+    "typescript": "^5.5.4",
+    "vitest": "^2.0.5"
   }
 }
