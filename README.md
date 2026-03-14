@@ -20,17 +20,12 @@ Designed for crate diggers and DJs who want a fast, focused, and visually pleasi
 
 ## Features
 
-- **Direct Network Access:** Connects directly to the Soulseek network (no `slskd` daemon required).
-- **Instant Search:** Results stream live as they are found on the network, with throttled updates for smooth performance.
-- **Audio-Only Focus:** Automatically filters for music files (`.mp3`, `.flac`, `.wav`, `.m4a`, `.ogg`, `.aiff`, etc.).
-- **Smart Sorting:** Sorts results by file size (quality first) or bitrate.
+- **Direct Network Access:** Connects directly to the Soulseek network.
+- **Audio-Only:** Automatically filters for music files (`.mp3`, `.flac`, `.wav`, `.m4a`, `.ogg`, `.aiff`, etc.).
+- **Sorting:** Sorts results by file size (quality first) or bitrate.
 - **Discogs Integration:** View real release metadata (label, genre, year, style) directly in the TUI without opening a browser.
 - **YouTube Integration:** Instantly search for a track on YouTube to preview.
-- **Advanced Download Manager:**
-  - Track active downloads with real-time, byte-accurate progress bars.
-  - **Visual Strikethrough:** Cancelled or previously downloaded files are visually marked to prevent duplicates.
-  - **Background Transfers:** Multiple downloads run simultaneously while you continue searching.
-- **Smart Auto-Conversion (DJ Focused):**
+- **Auto-Conversion:**
   - Automatically converts downloads to **Rekordbox/CDJ compatible AIFF** (`pcm_s16be`) or **MP3**.
   - **Dynamic Quality Logic:** High-quality sources (≥ 19.5kHz) are kept lossless (AIFF); upscaled or low-quality files are converted to MP3 to save space.
 - **Spectral Analysis:** Uses FFT to detect "fake" high-bitrate files by analysing the actual frequency cutoff.
