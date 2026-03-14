@@ -4,6 +4,7 @@ import FFT from 'fft.js';
 import * as mm from 'music-metadata';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import { AppConfig } from './types.js';
 
 /**
@@ -55,45 +56,72 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
 
     /**
      * Reads raw PCM s16le samples from a file path into a Float32Array.
-     * Optionally re-encodes through 320k MP3 first (the "fake lossless" path).
+     * If throughMp3 is true, first re-encodes to 320k MP3 via a temp file
+     * (the "fake lossless" roundtrip). Using a temp file is required here
+     * because fluent-ffmpeg cannot consume another ffmpeg pipe as input.
      */
     function getPCMData(inputPath: string, throughMp3: boolean): Promise<Float32Array> {
-        return new Promise((resolve, reject) => {
-            let srcCommand = ffmpeg(inputPath).noVideo().audioChannels(1).audioFrequency(sampleRate);
+        return new Promise(async (resolve, reject) => {
+            const decodeToSamples = (srcPath: string) => {
+                return new Promise<Float32Array>((res, rej) => {
+                    const chunks: Buffer[] = [];
+                    // IMPORTANT: attach 'error' to the FfmpegCommand, not the pipe stream,
+                    // because fluent-ffmpeg emits errors on the command object.
+                    const cmd = ffmpeg(srcPath)
+                        .noVideo()
+                        .audioChannels(1)
+                        .audioFrequency(sampleRate)
+                        .toFormat('s16le')
+                        .on('error', rej);
 
-            // If we need the "fake lossless" version, pipe through MP3 encoding first
-            if (throughMp3) {
-                // Chain: original → MP3 320k → PCM s16le
-                const mp3Pipe = ffmpeg(inputPath)
-                    .noVideo()
-                    .audioChannels(1)
-                    .audioFrequency(sampleRate)
-                    .toFormat('mp3')
-                    .audioBitrate('320k')
-                    .pipe();
+                    const stream = cmd.pipe();
+                    stream.on('data', (chunk: Buffer) => chunks.push(chunk));
+                    stream.on('end', () => {
+                        const raw = Buffer.concat(chunks);
+                        const samples = new Float32Array(raw.length / 2);
+                        for (let i = 0; i < samples.length; i++) {
+                            samples[i] = raw.readInt16LE(i * 2) / 32768;
+                        }
+                        res(samples);
+                    });
+                });
+            };
 
-                srcCommand = ffmpeg(mp3Pipe as any)
-                    .noVideo()
-                    .inputFormat('mp3')
-                    .audioChannels(1)
-                    .audioFrequency(sampleRate);
+            if (!throughMp3) {
+                try {
+                    resolve(await decodeToSamples(inputPath));
+                } catch (e) { reject(e); }
+                return;
             }
 
-            const chunks: Buffer[] = [];
-            const stream = srcCommand.toFormat('s16le').pipe();
+            // Two-stage: encode to a temp MP3 on disk, then decode to PCM.
+            // We use os.tmpdir() + a unique suffix to avoid collisions.
+            const tmpMp3 = path.join(os.tmpdir(), `slsk_fakecheck_${Date.now()}.mp3`);
+            try {
+                // Stage 1: input → 320k MP3 temp file
+                await new Promise<void>((res, rej) => {
+                    ffmpeg(inputPath)
+                        .noVideo()
+                        .audioChannels(1)
+                        .audioFrequency(sampleRate)
+                        .toFormat('mp3')
+                        .audioBitrate('320k')
+                        .on('error', rej)
+                        .on('end', () => res())
+                        .save(tmpMp3);
+                });
 
-            stream.on('data', (chunk: Buffer) => chunks.push(chunk));
-            stream.on('error', reject);
-            stream.on('end', () => {
-                const raw = Buffer.concat(chunks);
-                const samples = new Float32Array(raw.length / 2);
-                for (let i = 0; i < samples.length; i++) {
-                    samples[i] = raw.readInt16LE(i * 2) / 32768;
-                }
+                // Stage 2: temp MP3 → PCM samples
+                const samples = await decodeToSamples(tmpMp3);
                 resolve(samples);
-            });
+            } catch (e) {
+                reject(e);
+            } finally {
+                try { fs.unlinkSync(tmpMp3); } catch (_) {}
+            }
         });
     }
+
 
     /**
      * Given PCM samples, compute average power spectrum and find the max
