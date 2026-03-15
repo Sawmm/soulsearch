@@ -181,9 +181,15 @@ export async function performSearch(
     };
 
     const queryEvent = `found:${query}`;
-    client.on(queryEvent, processFiles);
+    if (client) client.on(queryEvent, processFiles);
+    
+    if (!client) {
+        onResults(Object.values(resultsByUser));
+        return;
+    }
+
     client.search({ req: query, timeout: 15000 }, (err: any, finalResults: any[]) => {
-        client.removeListener(queryEvent, processFiles);
+        if (client) client.removeListener(queryEvent, processFiles);
         if (!err && finalResults) processFiles(finalResults);
         onResults(Object.values(resultsByUser));
     });
@@ -204,7 +210,13 @@ export async function downloadFile(
     const localPath = path.join(CONFIG.downloadPath, filename);
 
     return new Promise((resolve, reject) => {
+        if (!client) return reject(new Error('Soulseek client not connected'));
+        
+        let called = false;
         client.downloadStream({ file: file.raw }, (err: any, stream: any) => {
+            if (called) return;
+            called = true;
+            
             if (err) return reject(new Error(err.message || 'Download failed to start'));
 
             const writeStream = fs.createWriteStream(localPath);
@@ -252,7 +264,9 @@ function cleanupDownload(id: string, localPath?: string) {
 
 export function cancelDownload(id: string, localPath?: string) {
     const active = activeDownloads.get(id);
-    if (active && active.rejectPromise) {
+    if (!active) return;
+    
+    if (active.rejectPromise) {
         active.rejectPromise(new Error('Cancelled by user'));
     }
     cleanupDownload(id, localPath);

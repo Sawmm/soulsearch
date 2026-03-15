@@ -61,8 +61,7 @@ export async function applySmartFolders(localPath: string, config: AppConfig): P
  */
 export async function detectActualBitrate(filePath: string): Promise<{ maxFrequency: number; estimatedBitrate: string; isHighQuality: boolean }> {
     const sampleRate = 44100;
-    const fftSize = 4096;
-    const MIN_ANALYSIS_FREQ = 14000; // FakeFLAC scans from 14kHz upwards
+    const fftSize = 8192; // Higher resolution for better frequency estimation
 
     /**
      * Reads PCM s16le chunks from a file path and processes the FFT incrementally.
@@ -119,28 +118,32 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
 
                         // Average over blocks, convert to dB
                         const dbSpectrum = new Float32Array(fftSize / 2);
+                        let globalMaxPower = -Infinity;
+                        
                         for (let j = 0; j < fftSize / 2; j++) {
-                            dbSpectrum[j] = 10 * Math.log10(powerSpectrum[j] / numBlocks + 1e-10);
+                            const avgPower = powerSpectrum[j] / numBlocks;
+                            const db = 10 * Math.log10(avgPower + 1e-12);
+                            dbSpectrum[j] = db;
+                            if (db > globalMaxPower) globalMaxPower = db;
                         }
 
-                        // Find threshold: mean power of all bins above 14kHz
-                        const minBin = Math.floor(MIN_ANALYSIS_FREQ * fftSize / sampleRate);
-                        let sum = 0;
-                        for (let j = minBin; j < fftSize / 2; j++) sum += dbSpectrum[j];
-                        const meanDb = sum / (fftSize / 2 - minBin);
+                        // If globalMaxPower is extremely low, it's silence or near-silence
+                        if (globalMaxPower < -80) return res(0);
 
-                        // Max useful frequency: highest bin above 14kHz that is significantly
-                        // above the mean (has actual signal)
-                        const SIGNAL_THRESHOLD = meanDb + 10; // 10dB above noise
-                        let maxBin = minBin;
-                        for (let j = fftSize / 2 - 1; j >= minBin; j--) {
+                        // Threshold: -18dB from peak, but not lower than -65dB.
+                        // This helps distinguish genuine signal from lossy quantization noise.
+                        const SIGNAL_THRESHOLD = Math.max(globalMaxPower - 18, -65);
+                        
+                        let maxBin = 0;
+                        for (let j = fftSize / 2 - 1; j >= 0; j--) {
                             if (dbSpectrum[j] > SIGNAL_THRESHOLD) {
                                 maxBin = j;
                                 break;
                             }
                         }
 
-                        res((maxBin * sampleRate) / fftSize);
+                        const freq = (maxBin * sampleRate) / fftSize;
+                        res(freq);
                     });
                 });
             };
@@ -161,7 +164,7 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
                         .audioChannels(1)
                         .audioFrequency(sampleRate)
                         .toFormat('mp3')
-                        .audioBitrate('320k')
+                        .audioBitrate('320k') // FakeFLAC comparison point
                         .on('error', rej)
                         .on('end', () => res())
                         .save(tmpMp3);
@@ -178,32 +181,35 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
     }
 
     try {
-        // Run both analyses in parallel (Chunked API)
+        // Run both analyses in parallel
         const [originalMaxFreq, fakeMaxFreq] = await Promise.all([
             processSpectralStream(filePath, false),
             processSpectralStream(filePath, true)
         ]);
 
         // Key FakeFLAC logic: compare the two max frequencies.
-        // If original ≈ fake → the file was already lossy (fake lossless).
-        // If original > fake by a meaningful margin → it's genuinely lossless.
         const freqDiff = originalMaxFreq - fakeMaxFreq;
-        const isHighQuality = freqDiff > 1000; // >1kHz gap means genuine high-freq content
+        
+        // Lenient check: If it's > 18.5kHz, it's likely "Good enough" or Genuine.
+        // Genuine lossless usually goes to 20-22kHz.
+        // 320k MP3 cuts at 20.5kHz.
+        // 256k MP3 cuts at 19kHz.
+        // 192k MP3 cuts at 18kHz.
+        // 128k MP3 cuts at 16kHz.
+        const isHighQuality = originalMaxFreq > 18500 || freqDiff > 1000;
 
         let estimatedBitrate: string;
         if (!isHighQuality) {
-            // Original and fake match → already a lossy source
-            if (fakeMaxFreq < 15500) estimatedBitrate = 'Low Quality / Fake';
-            else if (fakeMaxFreq < 18000) estimatedBitrate = 'Medium (128k-192k)';
-            else estimatedBitrate = 'Good (256k)';
+            if (originalMaxFreq < 15500) estimatedBitrate = 'Low Quality / Fake';
+            else if (originalMaxFreq < 17500) estimatedBitrate = 'Medium (128k)';
+            else estimatedBitrate = 'Good (160k-192k)';
         } else {
-            estimatedBitrate = 'High Quality (320k/Lossless)';
+            estimatedBitrate = originalMaxFreq > 19500 ? 'High Quality (Lossless)' : 'Good (256k-320k)';
         }
 
         return { maxFrequency: originalMaxFreq, estimatedBitrate, isHighQuality };
     } catch (e) {
-        // Fallback if FFmpeg pipe chaining fails
-        return { maxFrequency: 0, estimatedBitrate: 'Unknown', isHighQuality: false };
+        return { maxFrequency: 0, estimatedBitrate: 'Error', isHighQuality: false };
     }
 }
 
