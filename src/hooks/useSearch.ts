@@ -31,7 +31,7 @@ export function useSearch(
                     const stats = { mp3: 0, wav: 0, flac: 0, aiff: 0, other: 0 };
                     newResults.forEach(res => {
                         res.files.forEach(f => {
-                            const ext = f.filename.split('.').pop()?.toLowerCase();
+                            const ext = path.extname(f.filename).toLowerCase().replace(/^\./, '');
                             if (ext === 'mp3') stats.mp3++;
                             else if (ext === 'wav') stats.wav++;
                             else if (ext === 'flac') stats.flac++;

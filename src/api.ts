@@ -2,6 +2,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { Readable } from 'stream';
 // @ts-ignore
 import slsk from 'slsk-client';
 import { SearchResult, SearchResultFile, AppConfig, DiscogsResult } from './types.js';
@@ -11,6 +12,20 @@ let connectionPromise: Promise<void> | null = null;
 const activeDownloads = new Map<string, { stream?: any, writeStream?: fs.WriteStream, rejectPromise?: (err: Error) => void }>();
 
 const CONFIG_PATH = path.join(os.homedir(), '.config', 'soulseekbrowser', 'config.json');
+
+function encodeCredential(value: string): string {
+    if (!value) return value;
+    if (value.startsWith('b64:')) return value;
+    return 'b64:' + Buffer.from(value).toString('base64');
+}
+
+function decodeCredential(value: string): string {
+    if (!value) return value;
+    if (value.startsWith('b64:')) {
+        return Buffer.from(value.slice(4), 'base64').toString('utf-8');
+    }
+    return value;
+}
 
 const DEFAULT_CONFIG: AppConfig = {
     username: process.env.SLSK_USER || '',
@@ -44,11 +59,75 @@ const DEFAULT_CONFIG: AppConfig = {
     }
 };
 
+function validateConfig(config: any): string[] {
+    const errors: string[] = [];
+
+    if (config.username !== undefined && typeof config.username !== 'string') {
+        errors.push('username must be a string');
+    }
+    if (config.password !== undefined && typeof config.password !== 'string') {
+        errors.push('password must be a string');
+    }
+    if (config.downloadPath !== undefined && typeof config.downloadPath !== 'string') {
+        errors.push('downloadPath must be a string');
+    }
+    if (config.sharePath !== undefined && typeof config.sharePath !== 'string') {
+        errors.push('sharePath must be a string');
+    }
+    if (config.portForwarded !== undefined && typeof config.portForwarded !== 'boolean') {
+        errors.push('portForwarded must be a boolean');
+    }
+    if (config.discogsToken !== undefined && typeof config.discogsToken !== 'string') {
+        errors.push('discogsToken must be a string');
+    }
+
+    if (config.autoConvert) {
+        const ac = config.autoConvert;
+        if (ac.enabled !== undefined && typeof ac.enabled !== 'boolean') errors.push('autoConvert.enabled must be a boolean');
+        if (ac.smartMode !== undefined && typeof ac.smartMode !== 'boolean') errors.push('autoConvert.smartMode must be a boolean');
+        if (ac.targetFormat !== undefined && !['mp3', 'aiff'].includes(ac.targetFormat)) errors.push('autoConvert.targetFormat must be "mp3" or "aiff"');
+        if (ac.mp3Bitrate !== undefined && typeof ac.mp3Bitrate !== 'string') errors.push('autoConvert.mp3Bitrate must be a string');
+        if (ac.detectFakeBitrate !== undefined && typeof ac.detectFakeBitrate !== 'boolean') errors.push('autoConvert.detectFakeBitrate must be a boolean');
+        if (ac.deleteOriginal !== undefined && typeof ac.deleteOriginal !== 'boolean') errors.push('autoConvert.deleteOriginal must be a boolean');
+        if (ac.normalizeVolume !== undefined && typeof ac.normalizeVolume !== 'boolean') errors.push('autoConvert.normalizeVolume must be a boolean');
+        if (ac.targetLufs !== undefined && typeof ac.targetLufs !== 'number') errors.push('autoConvert.targetLufs must be a number');
+        if (ac.smartFolders !== undefined && typeof ac.smartFolders !== 'boolean') errors.push('autoConvert.smartFolders must be a boolean');
+    }
+
+    if (config.search) {
+        const s = config.search;
+        if (s.audioExtensions !== undefined && (!Array.isArray(s.audioExtensions) || !s.audioExtensions.every((e: any) => typeof e === 'string'))) {
+            errors.push('search.audioExtensions must be an array of strings');
+        }
+        if (s.minBitrate !== undefined && typeof s.minBitrate !== 'number') errors.push('search.minBitrate must be a number');
+        if (s.sortBy !== undefined && !['size', 'bitrate', 'speed'].includes(s.sortBy)) errors.push('search.sortBy must be "size", "bitrate", or "speed"');
+        if (s.sortOrder !== undefined && !['asc', 'desc'].includes(s.sortOrder)) errors.push('search.sortOrder must be "asc" or "desc"');
+        if (s.wishlist !== undefined && !Array.isArray(s.wishlist)) errors.push('search.wishlist must be an array');
+    }
+
+    if (config.ui) {
+        const ui = config.ui;
+        if (ui.viewportSize !== undefined && typeof ui.viewportSize !== 'number') errors.push('ui.viewportSize must be a number');
+        if (ui.showBitrate !== undefined && typeof ui.showBitrate !== 'boolean') errors.push('ui.showBitrate must be a boolean');
+        if (ui.showSlots !== undefined && typeof ui.showSlots !== 'boolean') errors.push('ui.showSlots must be a boolean');
+    }
+
+    return errors;
+}
+
 function loadConfig(): AppConfig {
     let config = { ...DEFAULT_CONFIG };
     try {
         if (fs.existsSync(CONFIG_PATH)) {
             const userConfig = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
+
+            const validationErrors = validateConfig(userConfig);
+            if (validationErrors.length > 0) {
+                console.error('Config validation errors:');
+                validationErrors.forEach(err => console.error(`  - ${err}`));
+                console.error('Using default configuration for invalid values.');
+            }
+
             config = {
                 ...config,
                 ...userConfig,
@@ -56,25 +135,30 @@ function loadConfig(): AppConfig {
                 search: { ...config.search, ...userConfig.search },
                 ui: { ...config.ui, ...userConfig.ui }
             };
-            if (config.username) config.username = config.username.trim();
-            if (config.password) config.password = config.password.trim();
-            if (config.discogsToken) config.discogsToken = config.discogsToken.trim();
+            if (config.username) config.username = decodeCredential(config.username.trim());
+            if (config.password) config.password = decodeCredential(config.password.trim());
+            if (config.discogsToken) config.discogsToken = decodeCredential(config.discogsToken.trim());
             if (config.downloadPath) {
                 config.downloadPath = path.resolve(
-                    config.downloadPath.startsWith('~/') 
+                    config.downloadPath.startsWith('~/')
                         ? path.join(os.homedir(), config.downloadPath.slice(2))
                         : config.downloadPath
                 );
             }
             if (config.sharePath) {
                 config.sharePath = path.resolve(
-                    config.sharePath.startsWith('~/') 
+                    config.sharePath.startsWith('~/')
                         ? path.join(os.homedir(), config.sharePath.slice(2))
                         : config.sharePath
                 );
             }
         }
-    } catch (e) {}
+    } catch (e) {
+        if (e instanceof SyntaxError) {
+            console.error(`Error parsing config file at ${CONFIG_PATH}: Invalid JSON`);
+            console.error('Using default configuration.');
+        }
+    }
     return config;
 }
 
@@ -180,16 +264,16 @@ export async function performSearch(
         }
     };
 
-    const queryEvent = `found:${query}`;
-    if (client) client.on(queryEvent, processFiles);
-    
     if (!client) {
         onResults(Object.values(resultsByUser));
         return;
     }
 
+    const queryEvent = `found:${query}`;
+    client.on(queryEvent, processFiles);
+
     client.search({ req: query, timeout: 15000 }, (err: any, finalResults: any[]) => {
-        if (client) client.removeListener(queryEvent, processFiles);
+        client.removeListener(queryEvent, processFiles);
         if (!err && finalResults) processFiles(finalResults);
         onResults(Object.values(resultsByUser));
     });
@@ -213,28 +297,34 @@ export async function downloadFile(
         if (!client) return reject(new Error('Soulseek client not connected'));
         
         let called = false;
-        client.downloadStream({ file: file.raw }, (err: any, stream: any) => {
-            if (called) return;
-            called = true;
-            
-            if (err) return reject(new Error(err.message || 'Download failed to start'));
+        
+        const slskStream = new Readable();
+        slskStream._read = () => {};
+        
+        // Use download directly instead of downloadStream to avoid slsk-client bug where cb is null
+        client.download({ file: file.raw }, (err: any) => {
+            if (err) slskStream.emit('error', err);
+        }, slskStream);
+        
+        const writeStream = fs.createWriteStream(localPath);
+        activeDownloads.set(id, { stream: slskStream, writeStream, rejectPromise: reject });
 
-            const writeStream = fs.createWriteStream(localPath);
-            activeDownloads.set(id, { stream, writeStream, rejectPromise: reject });
+        let downloadedBytes = 0;
+        slskStream.on('data', (chunk: Buffer) => {
+            downloadedBytes += chunk.length;
+            const percent = Math.min(Math.round((downloadedBytes / file.size) * 100), 100);
+            onProgress(percent);
+        });
 
-            let downloadedBytes = 0;
-            stream.on('data', (chunk: Buffer) => {
-                downloadedBytes += chunk.length;
-                const percent = Math.min(Math.round((downloadedBytes / file.size) * 100), 100);
-                onProgress(percent);
-            });
-
-            stream.on('error', (streamErr: Error) => {
+        slskStream.on('error', (streamErr: Error) => {
+            if (!called) {
+                called = true;
                 cleanupDownload(id, localPath);
-                reject(streamErr);
-            });
+                reject(new Error(streamErr.message || 'Download failed to start'));
+            }
+        });
 
-            stream.pipe(writeStream);
+        slskStream.pipe(writeStream);
 
             writeStream.on('finish', () => {
                 activeDownloads.delete(id);
@@ -246,7 +336,6 @@ export async function downloadFile(
                 cleanupDownload(id, localPath);
                 reject(writeErr);
             });
-        });
     });
 }
 
