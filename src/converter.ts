@@ -75,7 +75,13 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
                     const fft = new FFT(fftSize);
                     const powerSpectrum = new Float32Array(fftSize / 2).fill(0);
                     let numBlocks = 0;
-                    
+
+                    // Precompute Hann window coefficients once for reuse across all blocks
+                    const hannWindow = new Float32Array(fftSize);
+                    for (let i = 0; i < fftSize; i++) {
+                        hannWindow[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / fftSize));
+                    }
+
                     let leftoverBuffer = Buffer.alloc(0);
                     const blockSizeBytes = fftSize * 2; // 16-bit PCM = 2 bytes per sample
 
@@ -99,7 +105,15 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
                             for (let i = 0; i < fftSize; i++) {
                                 samples[i] = blockRaw.readInt16LE(i * 2) / 32768;
                             }
-                            
+
+                            // Apply precomputed Hann window to reduce spectral leakage.
+                            // Without windowing, energy from strong frequency components
+                            // "leaks" into neighboring bins, raising the noise floor and
+                            // reducing the accuracy of the frequency cutoff detection.
+                            for (let i = 0; i < fftSize; i++) {
+                                samples[i] *= hannWindow[i];
+                            }
+
                             const out = fft.createComplexArray();
                             fft.realTransform(out, samples);
 
@@ -130,13 +144,32 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
                         // If globalMaxPower is extremely low, it's silence or near-silence
                         if (globalMaxPower < -80) return res(0);
 
+                        // Apply a moving average to smooth the spectrum.
+                        // This prevents isolated noise spikes from being mistaken
+                        // for genuine signal, which would inflate the detected ceiling.
+                        const smoothRadius = 4; // 9-bin window, total width ~48 Hz at 44.1kHz/8192
+                        const smoothed = new Float32Array(fftSize / 2);
+                        for (let j = 0; j < fftSize / 2; j++) {
+                            let sum = 0;
+                            let count = 0;
+                            const lo = Math.max(0, j - smoothRadius);
+                            const hi = Math.min(fftSize / 2 - 1, j + smoothRadius);
+                            for (let k = lo; k <= hi; k++) {
+                                sum += dbSpectrum[k];
+                                count++;
+                            }
+                            smoothed[j] = sum / count;
+                        }
+
                         // Threshold: -18dB from peak, but not lower than -65dB.
                         // This helps distinguish genuine signal from lossy quantization noise.
                         const SIGNAL_THRESHOLD = Math.max(globalMaxPower - 18, -65);
                         
+                        // Scan backward from Nyquist using the smoothed spectrum
+                        // to find the highest frequency with meaningful signal.
                         let maxBin = 0;
                         for (let j = fftSize / 2 - 1; j >= 0; j--) {
-                            if (dbSpectrum[j] > SIGNAL_THRESHOLD) {
+                            if (smoothed[j] > SIGNAL_THRESHOLD) {
                                 maxBin = j;
                                 break;
                             }
@@ -189,14 +222,22 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
 
         // Key FakeFLAC logic: compare the two max frequencies.
         const freqDiff = originalMaxFreq - fakeMaxFreq;
-        
+
+        // Handle edge case: insufficient spectral data (silence, very short, errors)
+        if (originalMaxFreq < 5000) {
+            return { maxFrequency: originalMaxFreq, estimatedBitrate: 'Unknown / Insufficient Data', isHighQuality: false };
+        }
+
         // Lenient check: If it's > 18.5kHz, it's likely "Good enough" or Genuine.
         // Genuine lossless usually goes to 20-22kHz.
         // 320k MP3 cuts at 20.5kHz.
         // 256k MP3 cuts at 19kHz.
         // 192k MP3 cuts at 18kHz.
         // 128k MP3 cuts at 16kHz.
-        const isHighQuality = originalMaxFreq > 18500 || freqDiff > 1000;
+        // Guard freqDiff: only trust the comparison when the original has a
+        // reasonably high ceiling (> 16kHz). Otherwise a noisy low-quality file
+        // could be misclassified as high quality due to spectral noise differences.
+        const isHighQuality = originalMaxFreq > 18500 || (freqDiff > 1000 && originalMaxFreq > 16000);
 
         let estimatedBitrate: string;
         if (!isHighQuality) {
