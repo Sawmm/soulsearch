@@ -104,10 +104,7 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
                         samples[i] = blockRaw.readInt16LE(i * 2) / 32768;
                     }
 
-                    // Apply precomputed Hann window to reduce spectral leakage.
-                    // Without windowing, energy from strong frequency components
-                    // "leaks" into neighboring bins, raising the noise floor and
-                    // reducing the accuracy of the frequency cutoff detection.
+                    // Apply Hann window to reduce spectral leakage
                     for (let i = 0; i < fftSize; i++) {
                         samples[i] *= hannWindow[i];
                     }
@@ -154,9 +151,8 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
                 // If the entire track is too quiet
                 if (globalMaxPower < -80) return res(0);
 
-                // Apply a moving average to smooth the spectrum.
-                // This prevents isolated noise spikes from being mistaken
-                // for genuine signal, which would inflate the detected ceiling.
+                // Apply a moving average to smooth the spectrum before scanning.
+                // This prevents isolated noise spikes from inflating the detected ceiling.
                 const smoothRadius = 4; // 9-bin window
                 const smoothed = new Float32Array(fftSize / 2);
                 for (let j = 0; j < fftSize / 2; j++) {
@@ -179,8 +175,6 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
                 const dropoff = targetSampleRate > 48000 ? 40 : 18;
                 const SIGNAL_THRESHOLD = Math.max(referencePower - dropoff, -85);
 
-                // Scan backward from Nyquist using the smoothed spectrum
-                // to find the highest frequency with meaningful signal.
                 let maxBin = 0;
                 for (let j = fftSize / 2 - 1; j >= 0; j--) {
                     if (smoothed[j] > SIGNAL_THRESHOLD) {
@@ -246,7 +240,7 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
 
         const freqDiff = originalMaxFreq - fakeMaxFreq;
 
-        // Handle edge case: insufficient spectral data (silence, very short, errors)
+        // Handle degenerate input: silence, corrupt, or very short files
         if (originalMaxFreq < 5000) {
             return { maxFrequency: originalMaxFreq, estimatedBitrate: 'Unknown / Insufficient Data', isHighQuality: false };
         }
@@ -255,8 +249,8 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
         // 1. If it's Hi-Res (> 48kHz) and original > 22kHz, it's definitely high quality.
         // 2. If original > 18.5kHz or has a significant treble gain over MP3 transcode.
         // Guard freqDiff: only trust the comparison when the original has a
-        // reasonably high ceiling (> 16kHz). Otherwise a noisy low-quality file
-        // could be misclassified as high quality due to spectral noise differences.
+        // reasonably high ceiling (> 16kHz) to prevent noisy low-quality files
+        // from being misclassified as high quality.
         const isHiRes = nativeSampleRate > 48000 && originalMaxFreq > 21000;
         const isHighQuality = isHiRes || originalMaxFreq > 18500 || (freqDiff > 1000 && originalMaxFreq > 16000);
 
