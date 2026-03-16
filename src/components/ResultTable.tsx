@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 import { THEME } from '../theme.js';
 import { AppConfig, SearchResult, SearchResultFile } from '../types.js';
+import { formatSize } from '../utils.js';
 
 interface ResultTableProps {
     results: SearchResult[];
@@ -13,14 +14,6 @@ interface ResultTableProps {
     config: AppConfig;
     downloadedIds: Set<string>;
 }
-
-const formatSize = (bytes: number): string => {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-};
 
 export const ResultTable: React.FC<ResultTableProps> = ({ 
     results, 
@@ -85,6 +78,17 @@ export const ResultTable: React.FC<ResultTableProps> = ({
             return valA < valB ? 1 : -1;
         }
     });
+
+    useEffect(() => {
+        const len = flattenedResults.length;
+        if (len === 0) {
+            setSelectedIndex(0);
+            setScrollOffset(0);
+        } else {
+            setSelectedIndex(prev => Math.min(prev, len - 1));
+            setScrollOffset(prev => Math.min(prev, Math.max(0, len - VIEWPORT_SIZE)));
+        }
+    }, [flattenedResults.length, VIEWPORT_SIZE]);
 
     useInput((input, key) => {
         if (!isFocused) return;

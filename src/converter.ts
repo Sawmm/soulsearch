@@ -83,35 +83,22 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
                         .toFormat('s16le')
                         .on('error', rej);
 
-                    const stream = cmd.pipe();
+                const stream = cmd.pipe();
+                
+                stream.on('data', (chunk: Buffer) => {
+                    let currentBuffer = Buffer.concat([leftoverBuffer, chunk]);
                     
-                    stream.on('data', (chunk: Buffer) => {
-                        let currentBuffer = Buffer.concat([leftoverBuffer, chunk]);
+                    while (currentBuffer.length >= blockSizeBytes) {
+                        const blockRaw = currentBuffer.subarray(0, blockSizeBytes);
+                        currentBuffer = currentBuffer.subarray(blockSizeBytes);
                         
-                        while (currentBuffer.length >= blockSizeBytes) {
-                            const blockRaw = currentBuffer.subarray(0, blockSizeBytes);
-                            currentBuffer = currentBuffer.subarray(blockSizeBytes);
-                            
-                            const samples = new Float32Array(fftSize);
-                            for (let i = 0; i < fftSize; i++) {
-                                samples[i] = blockRaw.readInt16LE(i * 2) / 32768;
-                            }
-                            
-                            const out = fft.createComplexArray();
-                            fft.realTransform(out, samples);
-
-                            for (let j = 0; j < fftSize / 2; j++) {
-                                const real = out[j * 2];
-                                const imag = out[j * 2 + 1];
-                                powerSpectrum[j] += real * real + imag * imag;
-                            }
-                            numBlocks++;
+                        const samples = new Float32Array(fftSize);
+                        for (let i = 0; i < fftSize; i++) {
+                            samples[i] = blockRaw.readInt16LE(i * 2) / 32768;
                         }
-                        leftoverBuffer = currentBuffer;
-                    });
-                    
-                    stream.on('end', () => {
-                        if (numBlocks === 0) return res(0);
+                        
+                        const out = fft.createComplexArray();
+                        fft.realTransform(out, samples);
 
                         // Average over blocks, convert to dB
                         const dbSpectrum = new Float32Array(fftSize / 2);
@@ -135,6 +122,19 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
                         if (globalMaxPower < -80) {
                             return res(0);
                         }
+                        numBlocks++;
+                    }
+                    leftoverBuffer = currentBuffer;
+                });
+                
+                stream.on('end', () => {
+                    if (numBlocks === 0) return res(0);
+
+                    // Average over blocks, convert to dB
+                    const dbSpectrum = new Float32Array(fftSize / 2);
+                    for (let j = 0; j < fftSize / 2; j++) {
+                        dbSpectrum[j] = 10 * Math.log10(powerSpectrum[j] / numBlocks + 1e-10);
+                    }
 
                         // Use mid-frequencies as reference to avoid sub-bass dominance
                         const referencePower = Math.max(midFreqMaxPower, -80);
@@ -151,19 +151,18 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
                                 break;
                             }
                         }
+                    }
 
                         const freq = (maxBin * targetSampleRate) / fftSize;
                         res(freq);
                     });
                 });
-            };
+            });
+        };
 
-            if (!throughMp3) {
-                try {
-                    resolve(await runFFTStream(inputPath));
-                } catch (e) { reject(e); }
-                return;
-            }
+        if (!throughMp3) {
+            return runFFTStream(inputPath);
+        }
 
             // Fake check comparison: re-encode to 320k MP3 (up to 48kHz)
             const mp3SampleRate = Math.min(targetSampleRate, 48000);
@@ -181,14 +180,10 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
                         .save(tmpMp3);
                 });
 
-                const maxFreq = await runFFTStream(tmpMp3);
-                resolve(maxFreq);
-            } catch (e) {
-                reject(e);
-            } finally {
-                try { fs.unlinkSync(tmpMp3); } catch (_) {}
-            }
-        });
+            return await runFFTStream(tmpMp3);
+        } finally {
+            try { fs.unlinkSync(tmpMp3); } catch (_) {}
+        }
     }
 
     try {
