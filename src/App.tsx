@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Box, Text, useInput } from 'ink';
 import open from 'open';
 import { spawn, ChildProcess } from 'child_process';
@@ -21,6 +21,12 @@ export const App = () => {
     const [isConnected, setIsConnected] = useState(false);
     const [focus, setFocus] = useState<'search' | 'results' | 'downloads' | 'discogs'>('search');
     const [audioPlayer, setAudioPlayer] = useState<ChildProcess | null>(null);
+    const audioPlayerRef = useRef<ChildProcess | null>(null);
+    
+    // Keep ref in sync with state
+    useEffect(() => {
+        audioPlayerRef.current = audioPlayer;
+    }, [audioPlayer]);
     
     // Discogs state
     const [discogsResult, setDiscogsResult] = useState<DiscogsResult | null>(null);
@@ -53,6 +59,24 @@ export const App = () => {
             }
         };
         connect();
+
+        const handleExit = () => {
+            if (audioPlayerRef.current) {
+                audioPlayerRef.current.kill();
+            }
+            process.exit(0);
+        };
+
+        process.on('SIGINT', handleExit);
+        process.on('SIGTERM', handleExit);
+
+        return () => {
+            if (audioPlayerRef.current) {
+                audioPlayerRef.current.kill();
+            }
+            process.removeListener('SIGINT', handleExit);
+            process.removeListener('SIGTERM', handleExit);
+        };
     }, [config]);
 
     const handleSubmit = (value: string) => {

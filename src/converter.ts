@@ -60,31 +60,28 @@ export async function applySmartFolders(localPath: string, config: AppConfig): P
  * If they match → it's a fake lossless. If original is higher → genuine.
  */
 export async function detectActualBitrate(filePath: string): Promise<{ maxFrequency: number; estimatedBitrate: string; isHighQuality: boolean }> {
-    const sampleRate = 44100;
-    const fftSize = 4096;
-    const MIN_ANALYSIS_FREQ = 14000; // FakeFLAC scans from 14kHz upwards
+    const fftSize = 8192; // Higher resolution for better frequency estimation
 
     /**
      * Reads PCM s16le chunks from a file path and processes the FFT incrementally.
-     * If throughMp3 is true, first re-encodes to 320k MP3 via a temp file.
-     * This chunked streaming prevents Out Of Memory (OOM) errors on large 24-bit FLACs.
      */
-    async function processSpectralStream(inputPath: string, throughMp3: boolean): Promise<number> {
-        const runFFTStream = (srcPath: string) => {
-            return new Promise<number>((res, rej) => {
-                const fft = new FFT(fftSize);
-                const powerSpectrum = new Float32Array(fftSize / 2).fill(0);
-                let numBlocks = 0;
-                
-                let leftoverBuffer = Buffer.alloc(0);
-                const blockSizeBytes = fftSize * 2; // 16-bit PCM = 2 bytes per sample
+    function processSpectralStream(inputPath: string, targetSampleRate: number, throughMp3: boolean): Promise<number> {
+        return new Promise(async (resolve, reject) => {
+            const runFFTStream = (srcPath: string) => {
+                return new Promise<number>((res, rej) => {
+                    const fft = new FFT(fftSize);
+                    const powerSpectrum = new Float32Array(fftSize / 2).fill(0);
+                    let numBlocks = 0;
+                    
+                    let leftoverBuffer = Buffer.alloc(0);
+                    const blockSizeBytes = fftSize * 2; // 16-bit PCM = 2 bytes per sample
 
-                const cmd = ffmpeg(srcPath)
-                    .noVideo()
-                    .audioChannels(1)
-                    .audioFrequency(sampleRate)
-                    .toFormat('s16le')
-                    .on('error', rej);
+                    const cmd = ffmpeg(srcPath)
+                        .noVideo()
+                        .audioChannels(1)
+                        .audioFrequency(targetSampleRate)
+                        .toFormat('s16le')
+                        .on('error', rej);
 
                 const stream = cmd.pipe();
                 
@@ -103,10 +100,27 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
                         const out = fft.createComplexArray();
                         fft.realTransform(out, samples);
 
+                        // Average over blocks, convert to dB
+                        const dbSpectrum = new Float32Array(fftSize / 2);
+                        let globalMaxPower = -Infinity;
+                        let midFreqMaxPower = -Infinity; // max power in 10kHz-15kHz range
+                        
+                        const bin10k = Math.floor(10000 * fftSize / targetSampleRate);
+                        const bin15k = Math.floor(15000 * fftSize / targetSampleRate);
+
                         for (let j = 0; j < fftSize / 2; j++) {
-                            const real = out[j * 2];
-                            const imag = out[j * 2 + 1];
-                            powerSpectrum[j] += real * real + imag * imag;
+                            const avgPower = powerSpectrum[j] / numBlocks;
+                            const db = 10 * Math.log10(avgPower + 1e-12);
+                            dbSpectrum[j] = db;
+                            if (db > globalMaxPower) globalMaxPower = db;
+                            if (j >= bin10k && j <= bin15k && db > midFreqMaxPower) {
+                                midFreqMaxPower = db;
+                            }
+                        }
+
+                        // If the entire track is too quiet
+                        if (globalMaxPower < -80) {
+                            return res(0);
                         }
                         numBlocks++;
                     }
@@ -122,24 +136,26 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
                         dbSpectrum[j] = 10 * Math.log10(powerSpectrum[j] / numBlocks + 1e-10);
                     }
 
-                    // Find threshold: mean power of all bins above 14kHz
-                    const minBin = Math.floor(MIN_ANALYSIS_FREQ * fftSize / sampleRate);
-                    let sum = 0;
-                    for (let j = minBin; j < fftSize / 2; j++) sum += dbSpectrum[j];
-                    const meanDb = sum / (fftSize / 2 - minBin);
+                        // Use mid-frequencies as reference to avoid sub-bass dominance
+                        const referencePower = Math.max(midFreqMaxPower, -80);
 
-                    // Max useful frequency: highest bin above 14kHz that is significantly
-                    // above the mean (has actual signal)
-                    const SIGNAL_THRESHOLD = meanDb + 10; // 10dB above noise
-                    let maxBin = minBin;
-                    for (let j = fftSize / 2 - 1; j >= minBin; j--) {
-                        if (dbSpectrum[j] > SIGNAL_THRESHOLD) {
-                            maxBin = j;
-                            break;
+                        // Threshold: Generally 15dB below the 10k-15k peak.
+                        // For Hi-Res, we are much more lenient (-40dB) to catch weaker ultrasonic peaks.
+                        const dropoff = targetSampleRate > 48000 ? 40 : 18;
+                        const SIGNAL_THRESHOLD = Math.max(referencePower - dropoff, -85);
+                        
+                        let maxBin = 0;
+                        for (let j = fftSize / 2 - 1; j >= 0; j--) {
+                            if (dbSpectrum[j] > SIGNAL_THRESHOLD) {
+                                maxBin = j;
+                                break;
+                            }
                         }
                     }
 
-                    res((maxBin * sampleRate) / fftSize);
+                        const freq = (maxBin * targetSampleRate) / fftSize;
+                        res(freq);
+                    });
                 });
             });
         };
@@ -148,20 +164,21 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
             return runFFTStream(inputPath);
         }
 
-        // Two-stage: encode to a temp MP3 on disk, then decode and stream to FFT.
-        const tmpMp3 = path.join(os.tmpdir(), `slsk_fakecheck_${Date.now()}.mp3`);
-        try {
-            await new Promise<void>((res, rej) => {
-                ffmpeg(inputPath)
-                    .noVideo()
-                    .audioChannels(1)
-                    .audioFrequency(sampleRate)
-                    .toFormat('mp3')
-                    .audioBitrate('320k')
-                    .on('error', rej)
-                    .on('end', () => res())
-                    .save(tmpMp3);
-            });
+            // Fake check comparison: re-encode to 320k MP3 (up to 48kHz)
+            const mp3SampleRate = Math.min(targetSampleRate, 48000);
+            const tmpMp3 = path.join(os.tmpdir(), `slsk_fakecheck_${Date.now()}.mp3`);
+            try {
+                await new Promise<void>((res, rej) => {
+                    ffmpeg(inputPath)
+                        .noVideo()
+                        .audioChannels(1)
+                        .audioFrequency(mp3SampleRate)
+                        .toFormat('mp3')
+                        .audioBitrate('320k')
+                        .on('error', rej)
+                        .on('end', () => res())
+                        .save(tmpMp3);
+                });
 
             return await runFFTStream(tmpMp3);
         } finally {
@@ -170,32 +187,37 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
     }
 
     try {
-        // Run both analyses in parallel (Chunked API)
+        const metadata = await mm.parseFile(filePath);
+        const nativeSampleRate = metadata.format.sampleRate || 44100;
+
+        // Run both analyses in parallel
         const [originalMaxFreq, fakeMaxFreq] = await Promise.all([
-            processSpectralStream(filePath, false),
-            processSpectralStream(filePath, true)
+            processSpectralStream(filePath, nativeSampleRate, false),
+            processSpectralStream(filePath, nativeSampleRate, true)
         ]);
 
-        // Key FakeFLAC logic: compare the two max frequencies.
-        // If original ≈ fake → the file was already lossy (fake lossless).
-        // If original > fake by a meaningful margin → it's genuinely lossless.
         const freqDiff = originalMaxFreq - fakeMaxFreq;
-        const isHighQuality = freqDiff > 1000; // >1kHz gap means genuine high-freq content
+        
+        // Quality Logic:
+        // 1. If it's Hi-Res (> 48kHz) and original > 22kHz, it's definitely high quality.
+        // 2. If original > 18.5kHz or has a significant treble gain over MP3 transcode.
+        const isHiRes = nativeSampleRate > 48000 && originalMaxFreq > 21000;
+        const isHighQuality = isHiRes || originalMaxFreq > 18500 || freqDiff > 1000;
 
         let estimatedBitrate: string;
-        if (!isHighQuality) {
-            // Original and fake match → already a lossy source
-            if (fakeMaxFreq < 15500) estimatedBitrate = 'Low Quality / Fake';
-            else if (fakeMaxFreq < 18000) estimatedBitrate = 'Medium (128k-192k)';
-            else estimatedBitrate = 'Good (256k)';
+        if (isHiRes) {
+            estimatedBitrate = 'Hi-Res Lossless';
+        } else if (!isHighQuality) {
+            if (originalMaxFreq < 15500) estimatedBitrate = 'Low Quality / Fake';
+            else if (originalMaxFreq < 17500) estimatedBitrate = 'Medium (128k)';
+            else estimatedBitrate = 'Good (160k-192k)';
         } else {
-            estimatedBitrate = 'High Quality (320k/Lossless)';
+            estimatedBitrate = originalMaxFreq > 19500 ? 'High Quality (Lossless)' : 'Good (256k-320k)';
         }
 
         return { maxFrequency: originalMaxFreq, estimatedBitrate, isHighQuality };
     } catch (e) {
-        // Fallback if FFmpeg pipe chaining fails
-        return { maxFrequency: 0, estimatedBitrate: 'Unknown', isHighQuality: false };
+        return { maxFrequency: 0, estimatedBitrate: 'Error', isHighQuality: false };
     }
 }
 
