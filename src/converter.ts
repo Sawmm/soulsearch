@@ -27,8 +27,7 @@ export async function applySmartFolders(localPath: string, config: AppConfig): P
         const safeGenre = genreStr.replace(/[/\\?%*:|"<>]/g, '').trim() || 'Unknown Genre';
         const safeArtist = artistStr.replace(/[/\\?%*:|"<>]/g, '').trim() || 'Unknown Artist';
         
-        const baseDir = path.dirname(localPath);
-        const targetDir = path.join(baseDir, safeGenre, safeArtist);
+        const targetDir = path.join(config.downloadPath, safeGenre, safeArtist);
         
         if (!fs.existsSync(targetDir)) {
             fs.mkdirSync(targetDir, { recursive: true });
