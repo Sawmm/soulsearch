@@ -10,7 +10,8 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:ci": "tsc --noEmit && vitest run"
   },
   "dependencies": {
     "cli-table3": "^0.6.5",
