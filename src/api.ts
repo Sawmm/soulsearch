@@ -330,8 +330,9 @@ export async function downloadFile(
         slskStream.pipe(writeStream);
 
             writeStream.on('finish', () => {
+                if (called) return;
+                called = true;
                 activeDownloads.delete(id);
-                onProgress(100);
                 resolve(localPath);
             });
 

@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useRef } from 'react';
 import { downloadFile, cancelDownload } from '../api.js';
 import { convertAudio, detectActualBitrate, applySmartFolders } from '../converter.js';
 import type { DownloadTask, SearchResultFile, AppConfig } from '../types.js';
@@ -8,8 +8,10 @@ export function useDownloads(
     onStatus: (msg: string) => void
 ) {
     const [downloads, setDownloads] = useState<DownloadTask[]>([]);
+    // Tracks kill functions for in-progress conversions so we can abort ffmpeg on cancel
+    const conversionKills = useRef<Map<string, () => void>>(new Map());
 
-    const downloadedIds = useMemo(() => {
+    const downloadedIds = (() => {
         const ids = new Set<string>();
         downloads.forEach(d => {
             if (d.status !== 'error') {
@@ -17,7 +19,7 @@ export function useDownloads(
             }
         });
         return ids;
-    }, [downloads]);
+    })();
 
     const handleDownload = (username: string, file: SearchResultFile) => {
         const parts = file.filename.split(/[\\/]/);
@@ -27,13 +29,13 @@ export function useDownloads(
 
         if (downloadedIds.has(baseId)) return;
 
-        const newTask: DownloadTask = { 
-            id: taskId, 
-            filename, 
-            username, 
-            size: file.size, 
-            progress: 0, 
-            status: 'downloading' 
+        const newTask: DownloadTask = {
+            id: taskId,
+            filename,
+            username,
+            size: file.size,
+            progress: 0,
+            status: 'downloading'
         };
 
         setDownloads(prev => [newTask, ...prev]);
@@ -44,7 +46,7 @@ export function useDownloads(
         })
         .then(async (path) => {
             if (config.autoConvert.enabled) {
-                setDownloads(prev => prev.map(t => 
+                setDownloads(prev => prev.map(t =>
                     t.id === taskId ? { ...t, status: 'converting', progress: 100 } : t
                 ));
                 onStatus(`Processing: ${filename}...`);
@@ -52,7 +54,7 @@ export function useDownloads(
                 try {
                     let analysis = undefined;
                     let info = '';
-                    
+
                     // Always analyze if smartMode is on, or if specifically requested
                     if (config.autoConvert.smartMode || config.autoConvert.detectFakeBitrate) {
                         analysis = await detectActualBitrate(path);
@@ -60,18 +62,27 @@ export function useDownloads(
                     }
 
                     const result = await convertAudio(path, config, analysis);
+                    // Store the kill function so handleCancelDownload can abort the process
+                    conversionKills.current.set(taskId, result.kill);
+
                     let finalPath = result.outputPath;
 
                     if (config.autoConvert.smartFolders) {
                         finalPath = await applySmartFolders(finalPath, config);
                     }
 
-                    setDownloads(prev => prev.map(t => 
+                    conversionKills.current.delete(taskId);
+
+                    setDownloads(prev => prev.map(t =>
                         t.id === taskId ? { ...t, status: 'completed', localPath: finalPath, conversionInfo: `${result.format.toUpperCase()}${info ? " " + info : ""}` } : t
                     ));
                     onStatus(`Finished: ${filename}${info} (${result.format.toUpperCase()})`);
                 } catch (convErr) {
-                    setDownloads(prev => prev.map(t => 
+                    conversionKills.current.delete(taskId);
+                    const errMsg = convErr instanceof Error ? convErr.message : 'Processing failed';
+                    // Don't report cancellations as errors
+                    if (errMsg === 'Cancelled by user') return;
+                    setDownloads(prev => prev.map(t =>
                         t.id === taskId ? { ...t, status: 'error', errorMessage: 'Processing failed' } : t
                     ));
                     onStatus(`Processing Error: ${filename}`);
@@ -82,7 +93,7 @@ export function useDownloads(
                     finalPath = await applySmartFolders(finalPath, config);
                 }
 
-                setDownloads(prev => prev.map(t => 
+                setDownloads(prev => prev.map(t =>
                     t.id === taskId ? { ...t, status: 'completed', localPath: finalPath, progress: 100, conversionInfo: 'Original' } : t
                 ));
                 onStatus(`Finished: ${filename}`);
@@ -90,7 +101,7 @@ export function useDownloads(
         })
         .catch((err) => {
             if (err.message === 'Cancelled by user') return;
-            setDownloads(prev => prev.map(t => 
+            setDownloads(prev => prev.map(t =>
                 t.id === taskId ? { ...t, status: 'error', errorMessage: err.message } : t
             ));
             onStatus(`Error: ${err.message}`);
@@ -99,13 +110,25 @@ export function useDownloads(
 
     const handleCancelDownload = (id: string) => {
         const task = downloads.find(t => t.id === id);
-        if (task && (task.status === 'downloading' || task.status === 'converting')) {
+        if (!task) return;
+
+        if (task.status === 'downloading') {
             cancelDownload(id, task.localPath);
-            setDownloads(prev => prev.map(t => 
-                t.id === id ? { ...t, status: 'error', errorMessage: 'Cancelled by user' } : t
-            ));
-            onStatus(`Cancelled: ${task.filename}`);
+        } else if (task.status === 'converting') {
+            // Kill the active ffmpeg conversion process
+            const killFn = conversionKills.current.get(id);
+            if (killFn) {
+                killFn();
+                conversionKills.current.delete(id);
+            }
+        } else {
+            return; // Nothing to cancel for completed/error tasks
         }
+
+        setDownloads(prev => prev.map(t =>
+            t.id === id ? { ...t, status: 'error', errorMessage: 'Cancelled by user' } : t
+        ));
+        onStatus(`Cancelled: ${task.filename}`);
     };
 
     const handleClearFinished = () => {

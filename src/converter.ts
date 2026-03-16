@@ -5,6 +5,8 @@ import * as mm from 'music-metadata';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import * as crypto from 'crypto';
+import { performance } from 'perf_hooks';
 import { AppConfig } from './types.js';
 
 /**
@@ -63,124 +65,138 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
     const fftSize = 8192; // Higher resolution for better frequency estimation
 
     /**
-     * Reads PCM s16le chunks from a file path and processes the FFT incrementally.
+     * Reads PCM s16le chunks from srcPath, runs the FFT, and returns the max significant frequency.
+     * Clears fluent-ffmpeg's perf_hooks entries after completion to prevent the
+     * MaxPerformanceEntryBufferExceededWarning during concurrent multi-song downloads.
      */
-    function processSpectralStream(inputPath: string, targetSampleRate: number, throughMp3: boolean): Promise<number> {
-        return new Promise(async (resolve, reject) => {
-            const runFFTStream = (srcPath: string) => {
-                return new Promise<number>((res, rej) => {
-                    const fft = new FFT(fftSize);
-                    const powerSpectrum = new Float32Array(fftSize / 2).fill(0);
-                    let numBlocks = 0;
-                    
-                    let leftoverBuffer = Buffer.alloc(0);
-                    const blockSizeBytes = fftSize * 2; // 16-bit PCM = 2 bytes per sample
+    function runFFTStream(srcPath: string, targetSampleRate: number): Promise<number> {
+        return new Promise<number>((res, rej) => {
+            const fft = new FFT(fftSize);
+            const powerSpectrum = new Float32Array(fftSize / 2).fill(0);
+            let numBlocks = 0;
 
-                    const cmd = ffmpeg(srcPath)
-                        .noVideo()
-                        .audioChannels(1)
-                        .audioFrequency(targetSampleRate)
-                        .toFormat('s16le')
-                        .on('error', rej);
+            let leftoverBuffer = Buffer.alloc(0);
+            const blockSizeBytes = fftSize * 2; // 16-bit PCM = 2 bytes per sample
 
-                const stream = cmd.pipe();
-                
-                stream.on('data', (chunk: Buffer) => {
-                    let currentBuffer = Buffer.concat([leftoverBuffer, chunk]);
-                    
-                    while (currentBuffer.length >= blockSizeBytes) {
-                        const blockRaw = currentBuffer.subarray(0, blockSizeBytes);
-                        currentBuffer = currentBuffer.subarray(blockSizeBytes);
-                        
-                        const samples = new Float32Array(fftSize);
-                        for (let i = 0; i < fftSize; i++) {
-                            samples[i] = blockRaw.readInt16LE(i * 2) / 32768;
-                        }
-                        
-                        const out = fft.createComplexArray();
-                        fft.realTransform(out, samples);
+            const cmd = ffmpeg(srcPath)
+                .noVideo()
+                .audioChannels(1)
+                .audioFrequency(targetSampleRate)
+                .toFormat('s16le')
+                .on('error', rej);
 
-                        // Average over blocks, convert to dB
-                        const dbSpectrum = new Float32Array(fftSize / 2);
-                        let globalMaxPower = -Infinity;
-                        let midFreqMaxPower = -Infinity; // max power in 10kHz-15kHz range
-                        
-                        const bin10k = Math.floor(10000 * fftSize / targetSampleRate);
-                        const bin15k = Math.floor(15000 * fftSize / targetSampleRate);
+            const stream = cmd.pipe();
 
-                        for (let j = 0; j < fftSize / 2; j++) {
-                            const avgPower = powerSpectrum[j] / numBlocks;
-                            const db = 10 * Math.log10(avgPower + 1e-12);
-                            dbSpectrum[j] = db;
-                            if (db > globalMaxPower) globalMaxPower = db;
-                            if (j >= bin10k && j <= bin15k && db > midFreqMaxPower) {
-                                midFreqMaxPower = db;
-                            }
-                        }
+            stream.on('data', (chunk: Buffer) => {
+                let currentBuffer = Buffer.concat([leftoverBuffer, chunk]);
 
-                        // If the entire track is too quiet
-                        if (globalMaxPower < -80) {
-                            return res(0);
-                        }
-                        numBlocks++;
+                while (currentBuffer.length >= blockSizeBytes) {
+                    const blockRaw = currentBuffer.subarray(0, blockSizeBytes);
+                    currentBuffer = currentBuffer.subarray(blockSizeBytes);
+
+                    const samples = new Float32Array(fftSize);
+                    for (let i = 0; i < fftSize; i++) {
+                        samples[i] = blockRaw.readInt16LE(i * 2) / 32768;
                     }
-                    leftoverBuffer = currentBuffer;
-                });
-                
-                stream.on('end', () => {
-                    if (numBlocks === 0) return res(0);
 
-                    // Average over blocks, convert to dB
-                    const dbSpectrum = new Float32Array(fftSize / 2);
+                    const out = fft.createComplexArray();
+                    fft.realTransform(out, samples);
+
                     for (let j = 0; j < fftSize / 2; j++) {
-                        dbSpectrum[j] = 10 * Math.log10(powerSpectrum[j] / numBlocks + 1e-10);
+                        const real = out[j * 2];
+                        const imag = out[j * 2 + 1];
+                        powerSpectrum[j] += real * real + imag * imag;
                     }
-
-                        // Use mid-frequencies as reference to avoid sub-bass dominance
-                        const referencePower = Math.max(midFreqMaxPower, -80);
-
-                        // Threshold: Generally 15dB below the 10k-15k peak.
-                        // For Hi-Res, we are much more lenient (-40dB) to catch weaker ultrasonic peaks.
-                        const dropoff = targetSampleRate > 48000 ? 40 : 18;
-                        const SIGNAL_THRESHOLD = Math.max(referencePower - dropoff, -85);
-                        
-                        let maxBin = 0;
-                        for (let j = fftSize / 2 - 1; j >= 0; j--) {
-                            if (dbSpectrum[j] > SIGNAL_THRESHOLD) {
-                                maxBin = j;
-                                break;
-                            }
-                        }
-                    }
-
-                        const freq = (maxBin * targetSampleRate) / fftSize;
-                        res(freq);
-                    });
-                });
+                    numBlocks++;
+                }
+                leftoverBuffer = currentBuffer;
             });
-        };
 
+            stream.on('end', () => {
+                // Clear fluent-ffmpeg's perf_hooks entries to prevent memory leak
+                // when many files are being analyzed concurrently.
+                performance.clearMeasures();
+                performance.clearMarks();
+
+                if (numBlocks === 0) return res(0);
+
+                // Average over blocks, convert to dB
+                const dbSpectrum = new Float32Array(fftSize / 2);
+                let globalMaxPower = -Infinity;
+                let midFreqMaxPower = -Infinity; // max power in 10kHz-15kHz range
+
+                const bin10k = Math.floor(10000 * fftSize / targetSampleRate);
+                const bin15k = Math.floor(15000 * fftSize / targetSampleRate);
+
+                for (let j = 0; j < fftSize / 2; j++) {
+                    const avgPower = powerSpectrum[j] / numBlocks;
+                    const db = 10 * Math.log10(avgPower + 1e-12);
+                    dbSpectrum[j] = db;
+                    if (db > globalMaxPower) globalMaxPower = db;
+                    if (j >= bin10k && j <= bin15k && db > midFreqMaxPower) {
+                        midFreqMaxPower = db;
+                    }
+                }
+
+                // If the entire track is too quiet
+                if (globalMaxPower < -80) return res(0);
+
+                // Use mid-frequencies as reference to avoid sub-bass dominance
+                const referencePower = Math.max(midFreqMaxPower, -80);
+
+                // Threshold: Generally 18dB below the 10k-15k peak.
+                // For Hi-Res, we are more lenient (-40dB) to catch weaker ultrasonic peaks.
+                const dropoff = targetSampleRate > 48000 ? 40 : 18;
+                const SIGNAL_THRESHOLD = Math.max(referencePower - dropoff, -85);
+
+                let maxBin = 0;
+                for (let j = fftSize / 2 - 1; j >= 0; j--) {
+                    if (dbSpectrum[j] > SIGNAL_THRESHOLD) {
+                        maxBin = j;
+                        break;
+                    }
+                }
+
+                const freq = (maxBin * targetSampleRate) / fftSize;
+                res(freq);
+            });
+        });
+    }
+
+    /**
+     * Optionally re-encodes the file through a 320k MP3 transcode first (for fake-lossless detection),
+     * then runs the FFT spectral analysis.
+     * Uses crypto.randomBytes for the temp filename to prevent collisions during concurrent downloads.
+     */
+    async function processSpectralStream(inputPath: string, targetSampleRate: number, throughMp3: boolean): Promise<number> {
         if (!throughMp3) {
-            return runFFTStream(inputPath);
+            return runFFTStream(inputPath, targetSampleRate);
         }
 
-            // Fake check comparison: re-encode to 320k MP3 (up to 48kHz)
-            const mp3SampleRate = Math.min(targetSampleRate, 48000);
-            const tmpMp3 = path.join(os.tmpdir(), `slsk_fakecheck_${Date.now()}.mp3`);
-            try {
-                await new Promise<void>((res, rej) => {
-                    ffmpeg(inputPath)
-                        .noVideo()
-                        .audioChannels(1)
-                        .audioFrequency(mp3SampleRate)
-                        .toFormat('mp3')
-                        .audioBitrate('320k')
-                        .on('error', rej)
-                        .on('end', () => res())
-                        .save(tmpMp3);
-                });
+        // Re-encode to 320k MP3 (cap at 48kHz) then analyse
+        const mp3SampleRate = Math.min(targetSampleRate, 48000);
+        // Use random bytes to avoid temp-file collisions when multiple songs are analyzed at once
+        const randomSuffix = crypto.randomBytes(8).toString('hex');
+        const tmpMp3 = path.join(os.tmpdir(), `slsk_fakecheck_${randomSuffix}.mp3`);
+        try {
+            await new Promise<void>((res, rej) => {
+                ffmpeg(inputPath)
+                    .noVideo()
+                    .audioChannels(1)
+                    .audioFrequency(mp3SampleRate)
+                    .toFormat('mp3')
+                    .audioBitrate('320k')
+                    .on('error', rej)
+                    .on('end', () => {
+                        // Clear perf entries from the encode step too
+                        performance.clearMeasures();
+                        performance.clearMarks();
+                        res();
+                    })
+                    .save(tmpMp3);
+            });
 
-            return await runFFTStream(tmpMp3);
+            return await runFFTStream(tmpMp3, mp3SampleRate);
         } finally {
             try { fs.unlinkSync(tmpMp3); } catch (_) {}
         }
@@ -223,16 +239,17 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
 
 /**
  * Converts an audio file to the target format while preserving metadata.
+ * Returns { outputPath, format, kill } where kill() terminates the ffmpeg process immediately.
  */
 export async function convertAudio(
     inputPath: string,
     config: AppConfig,
     analysis?: { isHighQuality: boolean }
-): Promise<{ outputPath: string; format: string }> {
-    if (!config.autoConvert.enabled) return { outputPath: inputPath, format: 'original' };
+): Promise<{ outputPath: string; format: string; kill: () => void }> {
+    if (!config.autoConvert.enabled) return { outputPath: inputPath, format: 'original', kill: () => {} };
 
     const metadata = await mm.parseFile(inputPath);
-    
+
     // Determine target format
     let targetFormat = config.autoConvert.targetFormat;
     if (config.autoConvert.smartMode && analysis) {
@@ -244,16 +261,17 @@ export async function convertAudio(
 
     // Only skip conversion if we aren't compressing a fake track
     if (inputPath.toLowerCase().endsWith(ext)) {
-        // If it's already the target format, we only skip if we are NOT downsampling a fake track
-        // OR if volume normalization is off. If volume normalization is ON, we must process it.
         if (!config.autoConvert.normalizeVolume && (!config.autoConvert.smartMode || (analysis && analysis.isHighQuality))) {
-            return { outputPath: inputPath, format: targetFormat };
+            return { outputPath: inputPath, format: targetFormat, kill: () => {} };
         }
     }
 
     const tempPath = inputPath === outputPath ? outputPath + '.tmp' : outputPath;
 
-    return new Promise((resolve, reject) => {
+    // killRef is populated inside the Promise executor once the ffmpeg command is available
+    const killRef: { kill: () => void } = { kill: () => {} };
+
+    const promise = new Promise<{ outputPath: string; format: string; kill: () => void }>((resolve, reject) => {
         let command = ffmpeg(inputPath).noVideo();
 
         if (targetFormat === 'mp3') {
@@ -279,6 +297,12 @@ export async function convertAudio(
         }
         if (tags.track.no) command = command.outputOptions('-metadata', `track=${tags.track.no}`);
 
+        // Populate killRef so the caller can abort the ffmpeg process
+        killRef.kill = () => {
+            command.kill('SIGKILL');
+            try { fs.unlinkSync(tempPath); } catch (_) {}
+        };
+
         command
             .on('end', () => {
                 if (inputPath === outputPath) {
@@ -290,7 +314,7 @@ export async function convertAudio(
                 } else if (config.autoConvert.deleteOriginal && inputPath !== outputPath) {
                     try { fs.unlinkSync(inputPath); } catch (e) {}
                 }
-                resolve({ outputPath, format: targetFormat });
+                resolve({ outputPath, format: targetFormat, kill: () => {} });
             })
             .on('error', (err) => {
                 try { fs.unlinkSync(tempPath); } catch (e) {}
@@ -298,4 +322,6 @@ export async function convertAudio(
             })
             .save(tempPath);
     });
+
+    return promise.then(result => ({ ...result, kill: killRef.kill }));
 }
