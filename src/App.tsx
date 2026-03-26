@@ -3,12 +3,13 @@ import { Box, Text, useInput } from 'ink';
 import open from 'open';
 import { spawn, ChildProcess } from 'child_process';
 import os from 'os';
+import path from 'path';
 import { SearchInput } from './components/SearchInput.js';
 import { ResultTable } from './components/ResultTable.js';
 import { DownloadView } from './components/DownloadView.js';
-import { DiscogsView } from './components/DiscogsView.js';
-import { ensureConnected, getAppConfig, searchDiscogs } from './api.js';
-import type { DiscogsResult } from './types.js';
+import { MusicBrainzView } from './components/DiscogsView.js';
+import { ensureConnected, getAppConfig, searchMusicBrainz } from './api.js';
+import type { MusicBrainzResult } from './types.js';
 import { THEME } from './theme.js';
 import { useSearch, useWishlistDaemon } from './hooks/useSearch.js';
 import { useDownloads } from './hooks/useDownloads.js';
@@ -22,27 +23,26 @@ export const App = () => {
     const [focus, setFocus] = useState<'search' | 'results' | 'downloads' | 'discogs'>('search');
     const [audioPlayer, setAudioPlayer] = useState<ChildProcess | null>(null);
     const audioPlayerRef = useRef<ChildProcess | null>(null);
-    
-    // Keep ref in sync with state
+    const isResultsFilteringRef = useRef(false);
+    const isResultsDrillingRef = useRef(false);
+
     useEffect(() => {
         audioPlayerRef.current = audioPlayer;
     }, [audioPlayer]);
-    
-    // Discogs state
-    const [discogsResult, setDiscogsResult] = useState<DiscogsResult | null>(null);
-    const [discogsLoading, setDiscogsLoading] = useState(false);
-    const [discogsError, setDiscogsError] = useState<string | null>(null);
+
+    const [mbResult, setMbResult] = useState<MusicBrainzResult | null>(null);
+    const [mbLoading, setMbLoading] = useState(false);
+    const [mbError, setMbError] = useState<string | null>(null);
 
     const config = useMemo(() => getAppConfig(), []);
 
-    // Custom Hooks
     const { results, fileStats } = useSearch(submittedQuery, isConnected, setStatus, setError);
-    const { 
-        downloads, 
-        downloadedIds, 
-        handleDownload, 
-        handleCancelDownload, 
-        handleClearFinished 
+    const {
+        downloads,
+        downloadedIds,
+        handleDownload,
+        handleCancelDownload,
+        handleClearFinished
     } = useDownloads(config, setStatus);
 
     useWishlistDaemon(isConnected, config, setStatus, handleDownload);
@@ -53,7 +53,7 @@ export const App = () => {
                 setStatus('Connecting...');
                 await ensureConnected();
                 setIsConnected(true);
-                setStatus(config.portForwarded ? 'Connected (Full Mode)' : 'Connected (Restricted Mode)');
+                setStatus(config.portForwarded ? 'Connected · Full Mode' : 'Connected · Restricted Mode');
             } catch (err) {
                 setError(err instanceof Error ? err.message : 'Connection failed');
             }
@@ -91,7 +91,7 @@ export const App = () => {
                 setFocus('results');
             } else if (focus === 'search') {
                 if (results.length > 0) setFocus('results');
-            } else {
+            } else if (!isResultsFilteringRef.current && !isResultsDrillingRef.current) {
                 setFocus('search');
             }
         }
@@ -113,14 +113,21 @@ export const App = () => {
             return;
         }
 
+        // Fix 2: ensure the file to be played lives inside the configured download
+        // directory so a crafted path from a peer cannot reach arbitrary files.
+        const resolvedPlay = path.resolve(localPath);
+        const resolvedDownloadDir = path.resolve(config.downloadPath);
+        if (!resolvedPlay.startsWith(resolvedDownloadDir + path.sep)) {
+            setStatus(`Cannot play: file is outside download directory`);
+            return;
+        }
+
         const cmd = os.platform() === 'darwin' ? 'afplay' : 'ffplay';
         const args = os.platform() === 'darwin' ? [localPath] : ['-nodisp', '-autoexit', localPath];
-        
+
         try {
             const proc = spawn(cmd, args);
-            proc.on('close', () => {
-                setAudioPlayer(null);
-            });
+            proc.on('close', () => setAudioPlayer(null));
             proc.on('error', () => {
                 setStatus(`Cannot play audio. ${cmd} not found.`);
                 setAudioPlayer(null);
@@ -134,93 +141,100 @@ export const App = () => {
 
     const handleDiscogs = async (filename: string) => {
         setFocus('discogs');
-        setDiscogsLoading(true);
-        setDiscogsError(null);
-        setDiscogsResult(null);
+        setMbLoading(true);
+        setMbError(null);
+        setMbResult(null);
 
         try {
-            const result = await searchDiscogs(filename);
-            setDiscogsResult(result);
+            const result = await searchMusicBrainz(filename);
+            setMbResult(result);
         } catch (err) {
-            setDiscogsError(err instanceof Error ? err.message : 'Failed to fetch Discogs info');
+            setMbError(err instanceof Error ? err.message : 'Failed to fetch MusicBrainz info');
         } finally {
-            setDiscogsLoading(false);
+            setMbLoading(false);
         }
     };
 
+    const modeLabel = config.portForwarded ? 'FULL' : 'RESTRICTED';
+    const modeColor = config.portForwarded ? THEME.SUCCESS : THEME.WARNING;
+
+    const keyhint = focus === 'search'
+        ? 'enter:search  tab:downloads'
+        : focus === 'results'
+        ? 'j/k:scroll  enter:open/dl  a:dl all  v:toggle view  y:youtube  d:info  /:filter  esc:back  tab:downloads'
+        : focus === 'downloads'
+        ? 'j/k:scroll  space:play  x:cancel  c:clear  tab:results'
+        : 'esc:back';
+
     return (
-        <Box flexDirection="column" padding={1} minHeight={20}>
-            <Box marginBottom={1} borderStyle="round" borderColor={THEME.ACCENT} paddingX={1} justifyContent="space-between">
-                <Box flexDirection="column">
-                    <Text bold color={THEME.ACCENT}> ♫ SOULSEEK BROWSER </Text>
-                    <Text color={THEME.DIM}>
-                        {config.portForwarded ? 'Mode: FULL' : 'Mode: RESTRICTED'} • {config.downloadPath}
-                    </Text>
+        <Box flexDirection="column" paddingX={1} paddingY={0} minHeight={20}>
+            {/* Header */}
+            <Box marginBottom={0} borderStyle="single" borderColor={THEME.ACCENT} paddingX={1} justifyContent="space-between" alignItems="center">
+                <Box gap={2} alignItems="center">
+                    <Text bold color={THEME.ACCENT}>soulsearch</Text>
+                    <Text color={modeColor}>{modeLabel}</Text>
+                    <Text color={THEME.DIM}>{config.downloadPath}</Text>
                 </Box>
                 {submittedQuery && (
-                    <Box>
-                        <Text color={THEME.WARNING} bold> MP3:{fileStats.mp3} </Text>
-                        <Text color={THEME.INFO} bold> FLAC:{fileStats.flac} </Text>
-                        <Text color={THEME.SUCCESS} bold> WAV:{fileStats.wav} </Text>
-                        <Text color={THEME.ACCENT} bold> AIFF:{fileStats.aiff} </Text>
-                    </Box>
-                )}
-            </Box>
-            
-            <SearchInput 
-                value={query} 
-                onChange={setQuery} 
-                onSubmit={handleSubmit} 
-                isFocused={focus === 'search'}
-            />
-            
-            <Box paddingY={1} height={3} flexDirection="column">
-                {!isConnected && !error && <Text color={THEME.INFO}>Connecting to Soulseek network...</Text>}
-                {status && !error && <Text color={THEME.SUCCESS} bold>● {status}</Text>}
-                {error && (
-                    <Box flexDirection="column">
-                        <Text color={THEME.ERROR} bold>✖ {error}</Text>
+                    <Box gap={2}>
+                        <Text color={THEME.WARNING}>mp3 <Text bold>{fileStats.mp3}</Text></Text>
+                        <Text color={THEME.INFO}>flac <Text bold>{fileStats.flac}</Text></Text>
+                        <Text color={THEME.SUCCESS}>wav <Text bold>{fileStats.wav}</Text></Text>
+                        <Text color={THEME.ACCENT}>aiff <Text bold>{fileStats.aiff}</Text></Text>
                     </Box>
                 )}
             </Box>
 
-            <Box display={focus === 'downloads' ? 'flex' : 'none'} flexDirection="column">
-                <DownloadView 
-                    downloads={downloads} 
-                    isFocused={focus === 'downloads'} 
+            <Box marginTop={1}>
+                <SearchInput
+                    value={query}
+                    onChange={setQuery}
+                    onSubmit={handleSubmit}
+                    isFocused={focus === 'search'}
+                />
+            </Box>
+
+            <Box height={1} marginTop={1}>
+                {!isConnected && !error && <Text color={THEME.DIM}>connecting...</Text>}
+                {status && !error && <Text color={THEME.SUCCESS}>  {status}</Text>}
+                {error && <Text color={THEME.ERROR}>✗ {error}</Text>}
+            </Box>
+
+            <Box display={focus === 'downloads' ? 'flex' : 'none'} flexDirection="column" marginTop={1}>
+                <DownloadView
+                    downloads={downloads}
+                    isFocused={focus === 'downloads'}
                     onCancel={handleCancelDownload}
                     onClear={handleClearFinished}
                     onPlay={handlePlay}
                 />
             </Box>
 
-            <Box display={focus === 'discogs' ? 'flex' : 'none'} flexDirection="column">
-                <DiscogsView 
-                    result={discogsResult} 
-                    loading={discogsLoading} 
-                    error={discogsError} 
+            <Box display={focus === 'discogs' ? 'flex' : 'none'} flexDirection="column" marginTop={1}>
+                <MusicBrainzView
+                    result={mbResult}
+                    loading={mbLoading}
+                    error={mbError}
                 />
             </Box>
 
-            <Box display={focus === 'results' ? 'flex' : 'none'} flexDirection="column">
-                <ResultTable 
-                    results={results} 
-                    isFocused={focus === 'results'} 
+            <Box display={focus === 'results' ? 'flex' : 'none'} flexDirection="column" marginTop={1}>
+                <ResultTable
+                    results={results}
+                    submittedQuery={submittedQuery}
+                    isFocused={focus === 'results'}
                     onDownload={handleDownload}
                     onYoutube={handleYoutube}
                     onDiscogs={handleDiscogs}
                     config={config}
                     downloadedIds={downloadedIds}
+                    onFilterStateChange={(v) => { isResultsFilteringRef.current = v; }}
+                    onDrillStateChange={(v) => { isResultsDrillingRef.current = v; }}
                 />
             </Box>
-            
+
             <Box marginTop={1}>
-                <Text color={THEME.DIM}> 
-                    {focus === 'search' ? ' [Type] Search  [Enter] Submit  [Tab] Downloads' : 
-                     focus === 'results' ? ' [j/k] Scroll  [Enter] DL  [y] YouTube  [d] Discogs  [Esc] Toggle Focus  [Tab] Downloads' :
-                     focus === 'downloads' ? ' [j/k] Scroll  [x] Cancel  [c] Clear  [Tab] Results' :
-                     ' [Esc] Back to results'}
-                </Text>
+                <Text color={THEME.DIM}>{keyhint}</Text>
             </Box>
         </Box>
     );

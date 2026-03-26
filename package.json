@@ -1,11 +1,11 @@
 {
-  "name": "soulseekbrowser",
+  "name": "soulsearch",
   "version": "1.0.0",
-  "description": "Soulseek browser CLI",
+  "description": "SoulSearch CLI",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "soulsearch": "dist/index.js"
+    "soulsearch": "bin/soulsearch.js"
   },
   "scripts": {
     "build": "tsc",
@@ -13,6 +13,7 @@
     "test": "vitest run",
     "test:ci": "tsc --noEmit && vitest run"
   },
+  "packageManager": "pnpm@10.32.1",
   "dependencies": {
     "cli-table3": "^0.6.5",
     "commander": "^12.1.0",

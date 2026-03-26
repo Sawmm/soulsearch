@@ -70,18 +70,16 @@ export interface DownloadTask {
 }
 
 /**
- * Represents a Discogs search result.
+ * Represents a MusicBrainz recording/release lookup result.
  */
-export interface DiscogsResult {
-    id: number;
-    title: string;
+export interface MusicBrainzResult {
+    recordingTitle: string;
+    artist: string;
+    album?: string;
     year?: string;
-    label?: string[];
-    genre?: string[];
-    style?: string[];
+    label?: string;
     country?: string;
-    cover_image?: string;
-    resource_url: string;
+    releaseMbid?: string;
 }
 
 /**
@@ -91,9 +89,8 @@ export interface AppConfig {
     username: string;
     password: string;
     downloadPath: string;
-    sharePath: string;
+    sharePath: string | string[];
     portForwarded: boolean;
-    discogsToken?: string;
     autoConvert: {
         enabled: boolean;
         smartMode: boolean; // Dynamic MP3/AIFF based on quality
@@ -104,6 +101,7 @@ export interface AppConfig {
         normalizeVolume: boolean;
         targetLufs: number;
         smartFolders: boolean;
+        autoTag: boolean; // fetch and embed MusicBrainz metadata after download
     };
     search: {
         audioExtensions: string[];

@@ -1,13 +1,12 @@
-// Ghostty Optimized Theme - High Contrast on Dark Blue/Black
-// Based on Dracula palette for maximum readability
+// Tokyo Night — minimal, high-contrast on dark terminals
 export const THEME = {
-    PRIMARY: '#FFFFFF',    // Pure White for filenames
-    ACCENT: '#FF79C6',     // Pink/Magenta for borders/headers
-    SUCCESS: '#50FA7B',    // Bright Green for status
-    INFO: '#8BE9FD',       // Bright Cyan for metadata
-    WARNING: '#F1FA8C',    // Bright Yellow for selection/MP3
-    ERROR: '#FF5555',      // Red for failures
-    DIM: '#6272A4',        // Muted Blue/Gray for inactive text
-    BG_SELECT: '#44475A',  // Darker Selection Background
+    PRIMARY: '#C0CAF5',    // Soft blue-white for primary content
+    ACCENT: '#7AA2F7',     // Blue for active borders/headers
+    SUCCESS: '#9ECE6A',    // Muted green
+    INFO: '#73DACA',       // Teal for metadata/labels
+    WARNING: '#E0AF68',    // Amber for selection/warnings
+    ERROR: '#F7768E',      // Muted red-pink for failures
+    DIM: '#565F89',        // Muted purple-gray for inactive
+    BG_SELECT: '#2D3F76',  // Dark blue for selected row
     BLACK: '#000000'
 };

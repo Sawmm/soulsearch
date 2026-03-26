@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -61,11 +61,18 @@ export function useWishlistDaemon(
     onStatus: (msg: string) => void,
     onDownloadFound: (user: string, file: SearchResultFile) => void
 ) {
+    // Always-current refs so the daemon closure never goes stale even as
+    // handleDownload / setStatus get recreated on each parent render.
+    const onDownloadFoundRef = useRef(onDownloadFound);
+    const onStatusRef = useRef(onStatus);
+    useEffect(() => { onDownloadFoundRef.current = onDownloadFound; }, [onDownloadFound]);
+    useEffect(() => { onStatusRef.current = onStatus; }, [onStatus]);
+
     // Wishlist Background Daemon
     useEffect(() => {
         if (!isConnected || !config.search.wishlist || config.search.wishlist.length === 0) return;
 
-        const historyPath = path.join(os.homedir(), '.config', 'soulseekbrowser', 'wishlist-history.json');
+        const historyPath = path.join(os.homedir(), '.config', 'soulsearch', 'wishlist-history.json');
         
         const checkWishlist = async () => {
             let history: string[] = [];
@@ -73,7 +80,10 @@ export function useWishlistDaemon(
                 if (fs.existsSync(historyPath)) {
                     history = JSON.parse(fs.readFileSync(historyPath, 'utf8'));
                 }
-            } catch (e) {}
+            } catch (e) {
+                // Non-critical: if history file is unreadable, all wishlist items will be checked this cycle
+                console.warn('Could not read wishlist history:', e);
+            }
             
             for (const item of config.search.wishlist) {
                 if (history.includes(item)) continue;
@@ -98,10 +108,12 @@ export function useWishlistDaemon(
                             if (!currentHistory.includes(item)) {
                                 currentHistory.push(item);
                                 fs.writeFileSync(historyPath, JSON.stringify(currentHistory));
-                                onDownloadFound(bestMatch.user, bestMatch.file);
-                                onStatus(`Wishlist Found! Snatched: ${bestMatch.file.filename}`);
+                                onDownloadFoundRef.current(bestMatch.user, bestMatch.file);
+                                onStatusRef.current(`Wishlist Found! Snatched: ${bestMatch.file.filename}`);
                             }
-                        } catch(e) {}
+                        } catch(e) {
+                            console.warn('Could not update wishlist history:', e);
+                        }
                     }
                 });
                 

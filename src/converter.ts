@@ -20,19 +20,19 @@ export async function applySmartFolders(localPath: string, config: AppConfig): P
     try {
         const metadata = await mm.parseFile(localPath);
         const tags = metadata.common;
-        
-        const genreStr = (Array.isArray(tags.genre) ? tags.genre[0] : tags.genre) || 'Unknown Genre';
-        const artistStr = tags.artist || tags.albumartist || 'Unknown Artist';
-        
-        const safeGenre = genreStr.replace(/[/\\?%*:|"<>]/g, '').trim() || 'Unknown Genre';
-        const safeArtist = artistStr.replace(/[/\\?%*:|"<>]/g, '').trim() || 'Unknown Artist';
-        
+
+        const genreRaw = (Array.isArray(tags.genre) ? tags.genre[0] : tags.genre) || '';
+        const artistRaw = tags.artist || tags.albumartist || '';
+
+        const safeGenre = genreRaw.replace(/[/\\?%*:|"<>]/g, '').trim() || 'Unknown Genre';
+        const safeArtist = artistRaw.replace(/[/\\?%*:|"<>]/g, '').trim() || 'Unknown Artist';
+
         const targetDir = path.join(config.downloadPath, safeGenre, safeArtist);
-        
+
         if (!fs.existsSync(targetDir)) {
             fs.mkdirSync(targetDir, { recursive: true });
         }
-        
+
         const finalPath = path.join(targetDir, path.basename(localPath));
         if (localPath !== finalPath) {
             try {
@@ -48,10 +48,11 @@ export async function applySmartFolders(localPath: string, config: AppConfig): P
             }
             return finalPath;
         }
+        return localPath;
     } catch (e) {
-        // Fallback to original path if metadata or move fails
+        console.warn('applySmartFolders failed, keeping original path:', e);
+        return localPath;
     }
-    return localPath;
 }
 
 /**
@@ -82,7 +83,11 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
                 .audioChannels(1)
                 .audioFrequency(targetSampleRate)
                 .toFormat('s16le')
-                .on('error', rej);
+                .on('error', (err) => {
+                    performance.clearMeasures();
+                    performance.clearMarks();
+                    rej(err);
+                });
 
             const stream = cmd.pipe();
 
@@ -236,6 +241,75 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
     }
 }
 
+interface MBData {
+    title?: string;
+    artist?: string;
+    album?: string;
+    year?: string;
+    label?: string;
+    genre?: string;
+    coverArtPath?: string | null;
+}
+
+async function fetchCoverArtForMbid(mbid: string): Promise<string | null> {
+    try {
+        const artUrl = `https://coverartarchive.org/release/${mbid}/front-250`;
+        const controller = new AbortController();
+        const t = setTimeout(() => controller.abort(), 5000);
+        const res = await fetch(artUrl, { signal: controller.signal, redirect: 'follow' });
+        clearTimeout(t);
+        if (!res.ok) return null;
+        const imgBuffer = Buffer.from(await res.arrayBuffer());
+        const ext = (res.headers.get('content-type') || '').includes('png') ? '.png' : '.jpg';
+        const tmpPath = path.join(os.tmpdir(), `slsk_cover_${crypto.randomBytes(8).toString('hex')}${ext}`);
+        fs.writeFileSync(tmpPath, imgBuffer);
+        return tmpPath;
+    } catch {
+        return null;
+    }
+}
+
+async function fetchMusicBrainzData(title: string, artist: string): Promise<MBData | null> {
+    try {
+        const terms: string[] = [];
+        if (title) terms.push(`recording:"${title}"`);
+        if (artist) terms.push(`artist:"${artist}"`);
+        const query = terms.length > 0 ? terms.join(' AND ') : [title, artist].filter(Boolean).join(' ');
+        if (!query) return null;
+
+        const url = `https://musicbrainz.org/ws/2/recording?query=${encodeURIComponent(query)}&fmt=json&limit=1&inc=releases+tags`;
+        const controller = new AbortController();
+        const t = setTimeout(() => controller.abort(), 5000);
+        const res = await fetch(url, {
+            signal: controller.signal,
+            headers: { 'User-Agent': 'SoulSearch/1.0.0 (https://github.com/user/soulsearch)' }
+        });
+        clearTimeout(t);
+        if (!res.ok) return null;
+
+        const data = await res.json() as any;
+        const rec = data.recordings?.[0];
+        if (!rec) return null;
+
+        const release = rec.releases?.[0];
+        const topTag = [...(rec.tags ?? [])].sort((a: any, b: any) => b.count - a.count)[0]?.name;
+        const mbid: string | undefined = release?.id;
+
+        const result: MBData = {
+            title: rec.title,
+            artist: rec['artist-credit']?.[0]?.artist?.name,
+            album: release?.title,
+            year: release?.date?.substring(0, 4),
+            label: release?.['label-info']?.[0]?.label?.name,
+            genre: topTag,
+            coverArtPath: mbid ? await fetchCoverArtForMbid(mbid) : null,
+        };
+        return result;
+    } catch {
+        return null;
+    }
+}
+
 /**
  * Converts an audio file to the target format while preserving metadata.
  * Returns { outputPath, format, kill } where kill() terminates the ffmpeg process immediately.
@@ -243,7 +317,8 @@ export async function detectActualBitrate(filePath: string): Promise<{ maxFreque
 export async function convertAudio(
     inputPath: string,
     config: AppConfig,
-    analysis?: { isHighQuality: boolean }
+    analysis?: { isHighQuality: boolean },
+    onKillReady?: (kill: () => void) => void
 ): Promise<{ outputPath: string; format: string; kill: () => void }> {
     if (!config.autoConvert.enabled) return { outputPath: inputPath, format: 'original', kill: () => {} };
 
@@ -256,7 +331,7 @@ export async function convertAudio(
     }
 
     const ext = targetFormat === 'mp3' ? '.mp3' : '.aif';
-    const outputPath = inputPath.replace(/\.[^/.]+$/, "") + ext;
+    const outputPath = inputPath.replace(/\.[^/.]+$/, '') + ext;
 
     // Only skip conversion if we aren't compressing a fake track
     if (inputPath.toLowerCase().endsWith(ext)) {
@@ -267,16 +342,39 @@ export async function convertAudio(
 
     const tempPath = inputPath === outputPath ? outputPath + '.tmp' : outputPath;
 
+    // Check if source already has embedded cover art
+    const hasCoverArt = (metadata.common.picture?.length ?? 0) > 0;
+
+    // Fetch MusicBrainz data: cover art (if not embedded) and metadata overrides (if autoTag enabled)
+    let mbData: MBData | null = null;
+    if (!hasCoverArt || config.autoConvert.autoTag) {
+        const title = metadata.common.title || '';
+        const artist = metadata.common.artist || '';
+        if (title || artist) {
+            mbData = await fetchMusicBrainzData(title, artist);
+        }
+    }
+    const coverArtTempPath: string | null = hasCoverArt ? null : (mbData?.coverArtPath ?? null);
+
+    const cleanupCoverArt = () => {
+        if (coverArtTempPath) { try { fs.unlinkSync(coverArtTempPath); } catch (_) {} }
+    };
+
     // killRef is populated inside the Promise executor once the ffmpeg command is available
     const killRef: { kill: () => void } = { kill: () => {} };
 
     const promise = new Promise<{ outputPath: string; format: string; kill: () => void }>((resolve, reject) => {
-        let command = ffmpeg(inputPath).noVideo();
+        let command = ffmpeg(inputPath);
 
+        // Add external cover art as a second input if we fetched one
+        if (coverArtTempPath) {
+            command = command.input(coverArtTempPath);
+        }
+
+        // Set audio codec/format
         if (targetFormat === 'mp3') {
             command = command.toFormat('mp3').audioBitrate(config.autoConvert.mp3Bitrate);
         } else {
-            // High quality AIFF for CDJs (pcm_s16be is standard for AIFF, but big-endian is preferred)
             command = command.toFormat('aiff').audioCodec('pcm_s16be');
         }
 
@@ -284,26 +382,45 @@ export async function convertAudio(
             command = command.audioFilters(`loudnorm=I=${config.autoConvert.targetLufs}:LRA=11:TP=-1.5`);
         }
 
-        // Apply metadata tags
-        const tags = metadata.common;
-        if (tags.title) command = command.outputOptions('-metadata', `title=${tags.title}`);
-        if (tags.artist) command = command.outputOptions('-metadata', `artist=${tags.artist}`);
-        if (tags.album) command = command.outputOptions('-metadata', `album=${tags.album}`);
-        if (tags.year) command = command.outputOptions('-metadata', `date=${tags.year}`);
-        if (tags.genre) {
-            const genreStr = Array.isArray(tags.genre) ? tags.genre.join(', ') : tags.genre;
-            command = command.outputOptions('-metadata', `genre=${genreStr}`);
-        }
-        if (tags.track.no) command = command.outputOptions('-metadata', `track=${tags.track.no}`);
+        // Map audio from primary input
+        command = command.outputOptions('-map', '0:a');
 
-        // Populate killRef so the caller can abort the ffmpeg process
+        // Map cover art: prefer source-embedded art, then externally fetched art
+        if (hasCoverArt) {
+            command = command.outputOptions('-map', '0:v').outputOptions('-c:v', 'copy');
+        } else if (coverArtTempPath) {
+            command = command.outputOptions('-map', '1:v').outputOptions('-c:v', 'copy');
+        }
+
+        // Copy ALL metadata from source (replaces manual per-field copying)
+        command = command.outputOptions('-map_metadata', '0');
+
+        // AIFF requires explicit ID3v2 mode for tag embedding
+        if (targetFormat === 'aiff') {
+            command = command.outputOptions('-write_id3v2', '1');
+        }
+
+        // Override tags with MusicBrainz data when autoTag is enabled
+        if (config.autoConvert.autoTag && mbData) {
+            if (mbData.title)  command = command.outputOptions('-metadata', `title=${mbData.title}`);
+            if (mbData.artist) command = command.outputOptions('-metadata', `artist=${mbData.artist}`);
+            if (mbData.album)  command = command.outputOptions('-metadata', `album=${mbData.album}`);
+            if (mbData.year)   command = command.outputOptions('-metadata', `date=${mbData.year}`);
+            if (mbData.genre)  command = command.outputOptions('-metadata', `genre=${mbData.genre}`);
+            if (mbData.label)  command = command.outputOptions('-metadata', `organization=${mbData.label}`);
+        }
+
+        // Populate killRef and notify caller immediately so cancel works during conversion
         killRef.kill = () => {
             command.kill('SIGKILL');
             try { fs.unlinkSync(tempPath); } catch (_) {}
+            cleanupCoverArt();
         };
+        onKillReady?.(killRef.kill);
 
         command
             .on('end', () => {
+                cleanupCoverArt();
                 if (inputPath === outputPath) {
                     try {
                         fs.renameSync(tempPath, outputPath);
@@ -316,6 +433,7 @@ export async function convertAudio(
                 resolve({ outputPath, format: targetFormat, kill: () => {} });
             })
             .on('error', (err) => {
+                cleanupCoverArt();
                 try { fs.unlinkSync(tempPath); } catch (e) {}
                 reject(err);
             })
@@ -323,4 +441,84 @@ export async function convertAudio(
     });
 
     return promise.then(result => ({ ...result, kill: killRef.kill }));
+}
+
+/**
+ * Remuxes an audio file (no re-encoding) to update its tags from MusicBrainz
+ * and optionally embed cover art fetched from the Cover Art Archive.
+ * Returns the (unchanged) file path, or the original on failure.
+ */
+export async function tagAudioFile(filePath: string): Promise<string> {
+    if (!fs.existsSync(filePath)) return filePath;
+
+    let srcMeta: mm.IAudioMetadata;
+    try {
+        srcMeta = await mm.parseFile(filePath);
+    } catch {
+        return filePath;
+    }
+
+    const title  = srcMeta.common.title  || '';
+    const artist = srcMeta.common.artist || '';
+    if (!title && !artist) return filePath;
+
+    const mbData = await fetchMusicBrainzData(title, artist);
+    if (!mbData) return filePath;
+
+    const hasCoverArt = (srcMeta.common.picture?.length ?? 0) > 0;
+    const coverArtPath = hasCoverArt ? null : (mbData.coverArtPath ?? null);
+
+    const cleanupCover = () => {
+        if (mbData.coverArtPath) { try { fs.unlinkSync(mbData.coverArtPath); } catch (_) {} }
+    };
+
+    const tempPath = filePath + '.tagtmp';
+    const ext = path.extname(filePath).toLowerCase();
+
+    try {
+        await new Promise<void>((resolve, reject) => {
+            let command = ffmpeg(filePath);
+            if (coverArtPath) command = command.input(coverArtPath);
+
+            // Copy audio without re-encoding
+            command = command.outputOptions('-map', '0:a').outputOptions('-c:a', 'copy');
+
+            if (hasCoverArt) {
+                command = command.outputOptions('-map', '0:v').outputOptions('-c:v', 'copy');
+            } else if (coverArtPath) {
+                command = command.outputOptions('-map', '1:v').outputOptions('-c:v', 'copy');
+            }
+
+            // Preserve existing tags, then override with MusicBrainz data
+            command = command.outputOptions('-map_metadata', '0');
+            if (mbData.title)  command = command.outputOptions('-metadata', `title=${mbData.title}`);
+            if (mbData.artist) command = command.outputOptions('-metadata', `artist=${mbData.artist}`);
+            if (mbData.album)  command = command.outputOptions('-metadata', `album=${mbData.album}`);
+            if (mbData.year)   command = command.outputOptions('-metadata', `date=${mbData.year}`);
+            if (mbData.genre)  command = command.outputOptions('-metadata', `genre=${mbData.genre}`);
+            if (mbData.label)  command = command.outputOptions('-metadata', `organization=${mbData.label}`);
+
+            if (ext === '.aif' || ext === '.aiff') {
+                command = command.outputOptions('-write_id3v2', '1');
+            }
+
+            command
+                .on('end', () => resolve())
+                .on('error', (err) => {
+                    performance.clearMeasures();
+                    performance.clearMarks();
+                    reject(err);
+                })
+                .save(tempPath);
+        });
+
+        fs.renameSync(tempPath, filePath);
+        cleanupCover();
+        return filePath;
+    } catch (e) {
+        try { fs.unlinkSync(tempPath); } catch (_) {}
+        cleanupCover();
+        console.warn('tagAudioFile failed:', e);
+        return filePath;
+    }
 }

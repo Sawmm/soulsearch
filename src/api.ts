@@ -4,15 +4,16 @@ import * as os from 'os';
 import { Readable } from 'stream';
 // @ts-ignore
 import slsk from 'slsk-client';
-import { SearchResult, SearchResultFile, AppConfig, DiscogsResult } from './types.js';
+import { SearchResult, SearchResultFile, AppConfig, MusicBrainzResult } from './types.js';
 
 let client: any = null;
 let connectionPromise: Promise<void> | null = null;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 10;
+const activeSearchListeners = new Map<string, (input: any) => void>();
 const activeDownloads = new Map<string, { stream?: any, writeStream?: fs.WriteStream, rejectPromise?: (err: Error) => void }>();
 
-const CONFIG_PATH = path.join(os.homedir(), '.config', 'soulseekbrowser', 'config.json');
+const CONFIG_PATH = path.join(os.homedir(), '.config', 'soulsearch', 'config.json');
 
 function encodeCredential(value: string): string {
     if (!value) return value;
@@ -34,7 +35,6 @@ const DEFAULT_CONFIG: AppConfig = {
     downloadPath: path.join(os.homedir(), 'Downloads', 'soulsearch'),
     sharePath: '',
     portForwarded: false,
-    discogsToken: process.env.DISCOGS_TOKEN || '',
     autoConvert: {
         enabled: false,
         smartMode: true,
@@ -44,7 +44,8 @@ const DEFAULT_CONFIG: AppConfig = {
         deleteOriginal: false,
         normalizeVolume: false,
         targetLufs: -14.0,
-        smartFolders: false
+        smartFolders: false,
+        autoTag: false,
     },
     search: {
         audioExtensions: ['.mp3', '.flac', '.wav', '.m4a', '.ogg', '.aiff', '.m4p', '.wma', '.ape'],
@@ -72,16 +73,15 @@ function validateConfig(config: any): string[] {
     if (config.downloadPath !== undefined && typeof config.downloadPath !== 'string') {
         errors.push('downloadPath must be a string');
     }
-    if (config.sharePath !== undefined && typeof config.sharePath !== 'string') {
-        errors.push('sharePath must be a string');
+    if (config.sharePath !== undefined && typeof config.sharePath !== 'string' && !Array.isArray(config.sharePath)) {
+        errors.push('sharePath must be a string or array of strings');
+    }
+    if (Array.isArray(config.sharePath) && config.sharePath.some((p: any) => typeof p !== 'string')) {
+        errors.push('sharePath array entries must all be strings');
     }
     if (config.portForwarded !== undefined && typeof config.portForwarded !== 'boolean') {
         errors.push('portForwarded must be a boolean');
     }
-    if (config.discogsToken !== undefined && typeof config.discogsToken !== 'string') {
-        errors.push('discogsToken must be a string');
-    }
-
     if (config.autoConvert) {
         const ac = config.autoConvert;
         if (ac.enabled !== undefined && typeof ac.enabled !== 'boolean') errors.push('autoConvert.enabled must be a boolean');
@@ -93,6 +93,7 @@ function validateConfig(config: any): string[] {
         if (ac.normalizeVolume !== undefined && typeof ac.normalizeVolume !== 'boolean') errors.push('autoConvert.normalizeVolume must be a boolean');
         if (ac.targetLufs !== undefined && typeof ac.targetLufs !== 'number') errors.push('autoConvert.targetLufs must be a number');
         if (ac.smartFolders !== undefined && typeof ac.smartFolders !== 'boolean') errors.push('autoConvert.smartFolders must be a boolean');
+        if (ac.autoTag !== undefined && typeof ac.autoTag !== 'boolean') errors.push('autoConvert.autoTag must be a boolean');
     }
 
     if (config.search) {
@@ -101,7 +102,7 @@ function validateConfig(config: any): string[] {
             errors.push('search.audioExtensions must be an array of strings');
         }
         if (s.minBitrate !== undefined && typeof s.minBitrate !== 'number') errors.push('search.minBitrate must be a number');
-        if (s.sortBy !== undefined && !['size', 'bitrate', 'speed'].includes(s.sortBy)) errors.push('search.sortBy must be "size", "bitrate", or "speed"');
+        if (s.sortBy !== undefined && !['size', 'bitrate', 'user'].includes(s.sortBy)) errors.push('search.sortBy must be "size", "bitrate", or "user"');
         if (s.sortOrder !== undefined && !['asc', 'desc'].includes(s.sortOrder)) errors.push('search.sortOrder must be "asc" or "desc"');
         if (s.wishlist !== undefined && !Array.isArray(s.wishlist)) errors.push('search.wishlist must be an array');
     }
@@ -138,20 +139,22 @@ function loadConfig(): AppConfig {
             };
             if (config.username) config.username = decodeCredential(config.username.trim());
             if (config.password) config.password = decodeCredential(config.password.trim());
-            if (config.discogsToken) config.discogsToken = decodeCredential(config.discogsToken.trim());
-            if (config.downloadPath) {
+            if (config.downloadPath && config.downloadPath.trim()) {
                 config.downloadPath = path.resolve(
                     config.downloadPath.startsWith('~/')
                         ? path.join(os.homedir(), config.downloadPath.slice(2))
                         : config.downloadPath
                 );
+            } else {
+                config.downloadPath = DEFAULT_CONFIG.downloadPath;
             }
-            if (config.sharePath) {
-                config.sharePath = path.resolve(
-                    config.sharePath.startsWith('~/')
-                        ? path.join(os.homedir(), config.sharePath.slice(2))
-                        : config.sharePath
-                );
+            const resolvePath = (p: string) => path.resolve(
+                p.startsWith('~/') ? path.join(os.homedir(), p.slice(2)) : p
+            );
+            if (Array.isArray(config.sharePath)) {
+                config.sharePath = config.sharePath.map(resolvePath);
+            } else if (config.sharePath) {
+                config.sharePath = resolvePath(config.sharePath);
             }
         }
     } catch (e) {
@@ -174,8 +177,10 @@ export async function ensureConnected(): Promise<void> {
 
     connectionPromise = new Promise((resolve, reject) => {
         const connectOptions: any = { user: CONFIG.username, pass: CONFIG.password };
-        if (CONFIG.sharePath && fs.existsSync(CONFIG.sharePath)) {
-            connectOptions.sharedFolders = [CONFIG.sharePath];
+        const sharePaths = Array.isArray(CONFIG.sharePath) ? CONFIG.sharePath : CONFIG.sharePath ? [CONFIG.sharePath] : [];
+        const validSharePaths = sharePaths.filter(p => fs.existsSync(p));
+        if (validSharePaths.length > 0) {
+            connectOptions.sharedFolders = validSharePaths;
         }
 
         slsk.connect(connectOptions, (err: any, res: any) => {
@@ -192,6 +197,8 @@ export async function ensureConnected(): Promise<void> {
                     try { client.destroy(); } catch (e) {}
                     client = null;
                 }
+                // Drop any listeners waiting on searches that will never complete
+                activeSearchListeners.clear();
                 if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) return;
                 reconnectAttempts++;
                 const delay = Math.min(5000 * Math.pow(2, reconnectAttempts - 1), 300000);
@@ -273,14 +280,23 @@ export async function performSearch(
     }
 
     const queryEvent = `found:${query}`;
+    // Remove any stale listener for this query to prevent accumulation on repeated searches
+    const existingListener = activeSearchListeners.get(queryEvent);
+    if (existingListener) {
+        client.removeListener(queryEvent, existingListener);
+    }
+    activeSearchListeners.set(queryEvent, processFiles);
     client.on(queryEvent, processFiles);
 
     client.search({ req: query, timeout: 15000 }, (err: any, finalResults: any[]) => {
+        activeSearchListeners.delete(queryEvent);
         client.removeListener(queryEvent, processFiles);
         if (!err && finalResults) processFiles(finalResults);
         onResults(Object.values(resultsByUser));
     });
 }
+
+const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB hard limit
 
 export async function downloadFile(
     id: string,
@@ -288,13 +304,26 @@ export async function downloadFile(
     file: SearchResultFile,
     onProgress: (percent: number) => void
 ): Promise<string> {
+    // Fix 9: reject unreasonably large files before touching the network
+    if (file.size > MAX_FILE_SIZE) {
+        throw new Error(`File too large: ${Math.round(file.size / 1024 / 1024)} MB exceeds 2 GB limit`);
+    }
+
     await ensureConnected();
     if (!fs.existsSync(CONFIG.downloadPath)) {
         fs.mkdirSync(CONFIG.downloadPath, { recursive: true });
     }
-    const parts = file.filename.split(/[\\/]/);
-    const filename = parts[parts.length - 1] || 'unknown_file';
+
+    // Fix 1: use path.basename() to strip any directory components from the
+    // peer-supplied filename, then verify the resolved path stays inside the
+    // configured download directory (prevents path-traversal attacks).
+    const filename = path.basename(file.filename) || 'unknown_file';
     const localPath = path.join(CONFIG.downloadPath, filename);
+    const resolvedLocal = path.resolve(localPath);
+    const resolvedDownloadDir = path.resolve(CONFIG.downloadPath);
+    if (!resolvedLocal.startsWith(resolvedDownloadDir + path.sep)) {
+        throw new Error('Invalid file path: potential path traversal detected');
+    }
 
     return new Promise((resolve, reject) => {
         if (!client) return reject(new Error('Soulseek client not connected'));
@@ -365,28 +394,38 @@ export function cancelDownload(id: string, localPath?: string) {
     cleanupDownload(id, localPath);
 }
 
-export async function searchDiscogs(query: string, useToken: boolean = true): Promise<DiscogsResult | null> {
-    const cleanQuery = query.replace(/\.[^/.]+$/, "").replace(/[_\-]/g, " ").trim();
-    let url = `https://api.discogs.com/database/search?q=${encodeURIComponent(cleanQuery)}&type=release&per_page=1`;
-    
-    if (CONFIG.discogsToken && useToken) {
-        url += `&token=${CONFIG.discogsToken}`;
-    }
-    
+export async function searchMusicBrainz(query: string): Promise<MusicBrainzResult | null> {
+    const cleanQuery = query.replace(/\.[^/.]+$/, '').replace(/[_\-]/g, ' ').trim();
+    const url = `https://musicbrainz.org/ws/2/recording?query=${encodeURIComponent(cleanQuery)}&fmt=json&limit=1&inc=releases`;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
     try {
-        const response = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' } });
-        
-        // If the user's token is invalid, Discogs blocks the entire request with 401. 
-        // Fallback to a tokenless request so the UI still works.
-        if (response.status === 401 && CONFIG.discogsToken && useToken) {
-            return searchDiscogs(query, false);
-        }
-        
+        const response = await fetch(url, {
+            headers: { 'User-Agent': 'SoulSearch/1.0.0 (https://github.com/user/soulsearch)' },
+            signal: controller.signal,
+        });
         if (!response.ok) return null;
         const data = await response.json() as any;
-        return (data.results && data.results.length > 0) ? data.results[0] : null;
+        const rec = data.recordings?.[0];
+        if (!rec) return null;
+
+        const artist = rec['artist-credit']?.[0]?.artist?.name || '';
+        const release = rec.releases?.[0];
+
+        return {
+            recordingTitle: rec.title,
+            artist,
+            album: release?.title,
+            year: release?.date?.substring(0, 4),
+            label: release?.['label-info']?.[0]?.label?.name,
+            country: release?.country,
+            releaseMbid: release?.id,
+        };
     } catch (error) {
         if (error instanceof Error) throw error;
-        throw new Error('Discogs error');
+        throw new Error('MusicBrainz lookup error');
+    } finally {
+        clearTimeout(timeoutId);
     }
 }

@@ -1,88 +1,69 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 import { THEME } from '../theme.js';
-import { DiscogsResult } from '../types.js';
+import { MusicBrainzResult } from '../types.js';
 
-interface DiscogsViewProps {
-    result: DiscogsResult | null;
+interface MusicBrainzViewProps {
+    result: MusicBrainzResult | null;
     loading: boolean;
     error: string | null;
 }
 
-export const DiscogsView: React.FC<DiscogsViewProps> = ({ result, loading, error }) => {
+export const MusicBrainzView: React.FC<MusicBrainzViewProps> = ({ result, loading, error }) => {
     if (loading) {
         return (
-            <Box padding={2} borderStyle="round" borderColor={THEME.INFO} justifyContent="center">
-                <Text color={THEME.INFO}> Fetching Discogs data... </Text>
+            <Box padding={2} borderStyle="single" borderColor={THEME.INFO} justifyContent="center">
+                <Text color={THEME.INFO}>looking up musicbrainz...</Text>
             </Box>
         );
     }
 
     if (error) {
         return (
-            <Box padding={2} borderStyle="round" borderColor={THEME.ERROR} justifyContent="center" flexDirection="column" alignItems="center">
-                <Text color={THEME.ERROR}> Discogs Lookup Failed </Text>
-                <Text color={THEME.DIM}> {error} </Text>
-                <Box marginTop={1}>
-                    <Text color={THEME.DIM}> Press Esc to go back </Text>
-                </Box>
+            <Box padding={2} borderStyle="single" borderColor={THEME.ERROR} justifyContent="center" flexDirection="column" alignItems="center">
+                <Text color={THEME.ERROR}>lookup failed</Text>
+                <Text color={THEME.DIM}>{error}</Text>
+                <Box marginTop={1}><Text color={THEME.DIM}>esc · back</Text></Box>
             </Box>
         );
     }
 
     if (!result) {
         return (
-            <Box padding={2} borderStyle="round" borderColor={THEME.DIM} justifyContent="center" flexDirection="column" alignItems="center">
-                <Text color={THEME.DIM}> No Discogs release found for this file. </Text>
-                <Box marginTop={1}>
-                    <Text color={THEME.DIM}> Press Esc to go back </Text>
-                </Box>
+            <Box padding={2} borderStyle="single" borderColor={THEME.DIM} justifyContent="center" flexDirection="column" alignItems="center">
+                <Text color={THEME.DIM}>no musicbrainz entry found</Text>
+                <Box marginTop={1}><Text color={THEME.DIM}>esc · back</Text></Box>
             </Box>
         );
     }
 
     return (
-        <Box flexDirection="column" borderStyle="round" borderColor={THEME.ACCENT} padding={1}>
-            <Box marginBottom={1} borderBottom borderStyle="single" borderColor={THEME.ACCENT}>
-                <Text bold color={THEME.ACCENT}> DISCOGS RELEASE INFO </Text>
+        <Box flexDirection="column" borderStyle="single" borderColor={THEME.ACCENT} padding={1}>
+            <Box marginBottom={1}>
+                <Text color={THEME.ACCENT}>musicbrainz</Text>
             </Box>
 
             <Box flexDirection="column" marginBottom={1}>
-                <Box>
-                    <Box width={12}><Text color={THEME.INFO}>Title:</Text></Box>
-                    <Text color={THEME.PRIMARY} bold>{result.title}</Text>
-                </Box>
-                <Box>
-                    <Box width={12}><Text color={THEME.INFO}>Year:</Text></Box>
-                    <Text color={THEME.PRIMARY}>{result.year || 'N/A'}</Text>
-                </Box>
-                <Box>
-                    <Box width={12}><Text color={THEME.INFO}>Label:</Text></Box>
-                    <Text color={THEME.PRIMARY}>{result.label?.join(', ') || 'N/A'}</Text>
-                </Box>
-                <Box>
-                    <Box width={12}><Text color={THEME.INFO}>Country:</Text></Box>
-                    <Text color={THEME.PRIMARY}>{result.country || 'N/A'}</Text>
-                </Box>
+                {[
+                    ['track',   result.recordingTitle],
+                    ['artist',  result.artist || '—'],
+                    ['album',   result.album || '—'],
+                    ['year',    result.year || '—'],
+                    ['label',   result.label || '—'],
+                    ['country', result.country || '—'],
+                ].map(([label, value]) => (
+                    <Box key={label}>
+                        <Box width={10}><Text color={THEME.DIM}>{label}</Text></Box>
+                        <Text color={THEME.PRIMARY}>{value}</Text>
+                    </Box>
+                ))}
             </Box>
 
-            <Box flexDirection="column" marginBottom={1}>
-                <Box>
-                    <Box width={12}><Text color={THEME.INFO}>Genre:</Text></Box>
-                    <Text color={THEME.SUCCESS}>{result.genre?.join(', ') || 'N/A'}</Text>
-                </Box>
-                <Box>
-                    <Box width={12}><Text color={THEME.INFO}>Style:</Text></Box>
-                    <Text color={THEME.SUCCESS}>{result.style?.join(', ') || 'N/A'}</Text>
-                </Box>
-            </Box>
+            {result.releaseMbid && (
+                <Text color={THEME.DIM} wrap="truncate">mbid  {result.releaseMbid}</Text>
+            )}
 
-            <Box marginTop={1} borderTop borderStyle="single" borderColor={THEME.DIM} paddingTop={1} flexDirection="column">
-                <Text color={THEME.DIM} wrap="truncate"> URL: {result.resource_url} </Text>
-                <Box marginTop={1}>
-                    <Text color={THEME.DIM}> Press Esc to go back </Text>
-                </Box>
-            </Box>
+            <Box marginTop={1}><Text color={THEME.DIM}>esc · back</Text></Box>
         </Box>
     );
 };

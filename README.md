@@ -1,10 +1,10 @@
-# ♫ Soulseek Browser TUI
+# ♫ SoulSearch
 
 A high-performance, standalone Terminal User Interface (TUI) for the Soulseek network. Built with Node.js, React (Ink), and `slsk-client`.
 
 
 ```text
- ♫ SOULSEEK BROWSER
+ ♫ SOULSEARCH
  ╭──────────────────────────────────────────────────────────────────╮
  │ SEARCH artist, album, or song...                                 │
  ╰──────────────────────────────────────────────────────────────────╯
@@ -42,8 +42,8 @@ A high-performance, standalone Terminal User Interface (TUI) for the Soulseek ne
 
 1. **Clone the repo:**
    ```bash
-   git clone https://github.com/Sawmm/soulseek-browser-tui.git
-   cd soulseek-browser-tui
+   git clone https://github.com/Sawmm/soulsearch.git
+   cd soulsearch
    ```
 
 2. **Install dependencies:**
@@ -64,13 +64,13 @@ A high-performance, standalone Terminal User Interface (TUI) for the Soulseek ne
 
 ## Configuration
 
-The app stores its configuration at `~/.config/soulseekbrowser/config.json`.
+The app stores its configuration at `~/.config/soulsearch/config.json`.
 
 ```json
 {
   "username": "your_soulseek_username",
   "password": "your_soulseek_password",
-  "downloadPath": "~/Music/SoulseekDownloads",
+  "downloadPath": "~/Music/SoulSearchDownloads",
   "sharePath": "~/Music/MySharedFolders",
   "portForwarded": false,
   "discogsToken": "OPTIONAL_DISCOGS_TOKEN",
