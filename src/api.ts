@@ -314,10 +314,9 @@ export async function downloadFile(
         fs.mkdirSync(CONFIG.downloadPath, { recursive: true });
     }
 
-    // Fix 1: use path.basename() to strip any directory components from the
-    // peer-supplied filename, then verify the resolved path stays inside the
-    // configured download directory (prevents path-traversal attacks).
-    const filename = path.basename(file.filename) || 'unknown_file';
+    // Fix 1: split on both Unix and Windows separators (peers are mostly Windows)
+    // then verify the resolved path stays inside the configured download directory.
+    const filename = file.filename.split(/[/\\]/).pop() || 'unknown_file';
     const localPath = path.join(CONFIG.downloadPath, filename);
     const resolvedLocal = path.resolve(localPath);
     const resolvedDownloadDir = path.resolve(CONFIG.downloadPath);
